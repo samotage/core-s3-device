@@ -155,9 +155,18 @@ void RecorderServer::handleDownload() {
         server.send(500, "text/plain", "open failed");
         return;
     }
+    size_t fsize = f.size();
     server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
-    server.streamFile(f, "audio/wav");
+    size_t sent = server.streamFile(f, "audio/wav");
     f.close();
+    // A fully delivered pull is the real "Headspace has it" signal — ack here,
+    // not from the notify response (single-threaded: the device can't read that
+    // response while serving this very pull).
+    if (sent == fsize) {
+        ackFile(name);
+        Serial.printf("[NET] served + acked %s (%u bytes)\n", name.c_str(),
+                      (uint32_t)sent);
+    }
 }
 
 void RecorderServer::handleRoot() {
@@ -221,42 +230,18 @@ void RecorderServer::notifyHeadspace() {
 
     HTTPClient http;
     http.setConnectTimeout(3000);
-    http.setTimeout(6000);
+    // Short read timeout on purpose: Headspace pulls the WAV from us *before*
+    // replying, and we can't serve that pull while blocked here (single-thread).
+    // So we don't wait for / parse the response — files are acked when served
+    // (handleDownload). This POST just triggers the pull.
+    http.setTimeout(4000);
     if (!http.begin(HEADSPACE_NOTIFY_URL)) {
         Serial.println("[NET] notify: begin failed");
-        return;  // last_notify already set -> retry on the next back-off tick
+        return;
     }
     http.addHeader("Content-Type", "application/json");
     int code = http.POST(body);
-    if (code == 200) {
-        String resp = http.getString();
-        // Ack only files reported in the "pulled" array; fall back to acking all
-        // we sent if the response shape is unexpected (200 == success).
-        int pulled  = resp.indexOf("\"pulled\"");
-        int skipped = resp.indexOf("\"skipped\"");
-        int from = 0;
-        while (true) {
-            int q1 = list.indexOf('"', from);
-            if (q1 < 0) break;
-            int q2 = list.indexOf('"', q1 + 1);
-            if (q2 < 0) break;
-            String name = list.substring(q1 + 1, q2);
-            from = q2 + 1;
-            bool ack;
-            if (pulled < 0) {
-                ack = true;  // no "pulled" key, but 200 -> treat as accepted
-            } else {
-                int at = resp.indexOf("\"" + name + "\"", pulled);
-                ack = (at >= 0) && (skipped < 0 || at < skipped);
-            }
-            if (ack) ackFile(name);
-        }
-        Serial.printf("[NET] notify OK (%d new): %s\n", count, resp.c_str());
-    } else {
-        // last_notify already set at the top -> retries on the next back-off tick.
-        Serial.printf("[NET] notify failed: HTTP %d — retry in %lus\n", code,
-                      NOTIFY_RETRY_MS / 1000);
-    }
+    Serial.printf("[NET] notify sent (%d new), http=%d\n", count, code);
     http.end();
 }
 
