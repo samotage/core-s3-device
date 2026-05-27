@@ -56,6 +56,13 @@ void AppRecorderView::Create(lv_obj_t* root) {
     lv_bar_set_value(ui.bar_level, 0, LV_ANIM_OFF);
     lv_obj_add_flag(ui.bar_level, LV_OBJ_FLAG_HIDDEN);
 
+    // WiFi/reachability indicator, top-right (clear of the centred logo).
+    ui.label_wifi = lv_label_create(root);
+    lv_label_set_text(ui.label_wifi, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_font(ui.label_wifi, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(ui.label_wifi, COL_SURFACE, 0);  // dim until connected
+    lv_obj_align(ui.label_wifi, LV_ALIGN_TOP_RIGHT, -6, 6);
+
     // Status line.
     ui.label_status = lv_label_create(root);
     lv_obj_set_style_text_color(ui.label_status, COL_GREY, 0);
@@ -114,4 +121,8 @@ void AppRecorderView::SetError(const char* msg) {
 
 void AppRecorderView::SetLevel(uint8_t level) {
     lv_bar_set_value(ui.bar_level, level, LV_ANIM_OFF);
+}
+
+void AppRecorderView::SetWifi(bool connected) {
+    lv_obj_set_style_text_color(ui.label_wifi, connected ? COL_COPPER : COL_SURFACE, 0);
 }

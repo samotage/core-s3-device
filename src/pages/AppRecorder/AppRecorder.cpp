@@ -1,8 +1,9 @@
 #include "AppRecorder.h"
+#include "../../net/RecorderServer.h"
 
 using namespace Page;
 
-AppRecorder::AppRecorder() : timer(nullptr), last_sec(0) {}
+AppRecorder::AppRecorder() : timer(nullptr), last_sec(0), last_wifi(-1) {}
 
 AppRecorder::~AppRecorder() {}
 
@@ -71,6 +72,13 @@ void AppRecorder::AttachEvent(lv_obj_t* obj, lv_event_code_t code) {
 }
 
 void AppRecorder::Update() {
+    // WiFi/reachability indicator — refresh whether idle or recording.
+    int wifi = Net::Server.wifiConnected() ? 1 : 0;
+    if (wifi != last_wifi) {
+        last_wifi = wifi;
+        View.SetWifi(wifi == 1);
+    }
+
     if (!Model.IsRecording()) return;
 
     Model.WriteChunk();
@@ -110,11 +118,13 @@ void AppRecorder::onEvent(lv_event_t* event) {
     if (code == LV_EVENT_CLICKED && obj == instance->View.ui.btn_record) {
         if (instance->Model.IsRecording()) {
             instance->Model.StopRecording();
+            Net::Server.setRecording(false);  // re-open the HTTP server
             instance->View.SetSaved(instance->Model.LastFilename(),
                                     instance->last_sec);
         } else {
             instance->last_sec = 0;
             if (instance->Model.StartRecording()) {
+                Net::Server.setRecording(true);  // pause serving during capture
                 instance->View.SetRecording(0);
             } else {
                 instance->View.SetError(LV_SYMBOL_WARNING " SD card error");

@@ -15,6 +15,7 @@ class AppRecorderView {
     void SetSaved(const char* filename, uint32_t seconds);
     void SetError(const char* msg);
     void SetLevel(uint8_t level);  // 0..100
+    void SetWifi(bool connected);
 
    public:
     struct {
@@ -24,6 +25,7 @@ class AppRecorderView {
         lv_obj_t* label_btn;
         lv_obj_t* bar_level;
         lv_obj_t* label_status;
+        lv_obj_t* label_wifi;
     } ui;
 };
 

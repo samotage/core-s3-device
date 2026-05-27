@@ -1,2 +1,5 @@
 .pio/
 .vscode/
+
+# WiFi credentials — never commit (public repo). Copy secrets.h.example -> secrets.h.
+include/secrets.h

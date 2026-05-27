@@ -12,6 +12,7 @@
 #include "esp_camera.h"
 
 #include "App.h"
+#include "net/RecorderServer.h"
 
 void setup() {
     esp_err_t ret = nvs_flash_init();
@@ -47,10 +48,14 @@ void setup() {
     m5gfx_lvgl_init();
 
     App_Init();
+
+    // WiFi file server so a Headspace agent can pull recordings (no-op offline).
+    Net::Server.begin();
 }
 
 void loop() {
 
     lv_timer_handler();
+    Net::Server.loop();
     delay(10);
 }

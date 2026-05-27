@@ -1,0 +1,154 @@
+#include "RecorderServer.h"
+
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <SD.h>
+
+// WiFi credentials are optional at build time: the public repo compiles without
+// include/secrets.h (recorder just runs offline). Provide it to enable the server.
+#if defined(__has_include)
+#  if __has_include("secrets.h")
+#    include "secrets.h"
+#  endif
+#endif
+#ifndef WIFI_SSID
+#  define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASS
+#  define WIFI_PASS ""
+#endif
+#ifndef REC_HOSTNAME
+#  define REC_HOSTNAME "core-s3"
+#endif
+
+namespace Net {
+
+RecorderServer Server;
+
+static bool creds_present() { return strlen(WIFI_SSID) > 0; }
+
+void RecorderServer::begin() {
+    if (!creds_present()) {
+        Serial.println("[NET] No WiFi creds (include/secrets.h) — server disabled");
+        return;
+    }
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname(REC_HOSTNAME);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    Serial.printf("[NET] Connecting to \"%s\"...\n", WIFI_SSID);
+}
+
+void RecorderServer::loop() {
+    if (!creds_present()) return;
+
+    bool connected = (WiFi.status() == WL_CONNECTED);
+
+    // Bring up mDNS + HTTP once, the first time WiFi comes up.
+    if (connected && !started) {
+        if (MDNS.begin(REC_HOSTNAME)) {
+            MDNS.addService("http", "tcp", 80);
+            MDNS.addServiceTxt("http", "tcp", "path", "/api/recordings");
+        }
+        routes();
+        server.begin();
+        started = true;
+        Serial.printf("[NET] Up: http://%s.local  (%s)\n", REC_HOSTNAME,
+                      WiFi.localIP().toString().c_str());
+    }
+
+    if (started) server.handleClient();
+
+    if (!connected) {
+        uint32_t now = millis();
+        if (now - last_retry > 15000) {
+            last_retry = now;
+            WiFi.reconnect();
+        }
+    }
+}
+
+bool RecorderServer::wifiConnected() { return WiFi.status() == WL_CONNECTED; }
+
+String RecorderServer::hostUrl() { return String("http://") + REC_HOSTNAME + ".local"; }
+
+void RecorderServer::routes() {
+    server.on("/", HTTP_GET, [this]() { handleRoot(); });
+    server.on("/api/recordings", HTTP_GET, [this]() { handleList(); });
+    // /rec/<name> downloads land here.
+    server.onNotFound([this]() { handleDownload(); });
+}
+
+// Return just the basename of an SD path ("/REC_001.wav" -> "REC_001.wav").
+static String basename_of(const String& path) {
+    int slash = path.lastIndexOf('/');
+    return slash >= 0 ? path.substring(slash + 1) : path;
+}
+
+static bool is_recording_file(const String& base) {
+    return base.startsWith("REC_") && base.endsWith(".wav");
+}
+
+void RecorderServer::handleList() {
+    if (recording) {
+        server.send(503, "application/json", "{\"error\":\"recording\"}");
+        return;
+    }
+    String json = "[";
+    File dir = SD.open("/");
+    if (dir) {
+        bool first = true;
+        for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+            String base = basename_of(String(f.name()));
+            if (!f.isDirectory() && is_recording_file(base)) {
+                if (!first) json += ",";
+                first = false;
+                json += "{\"name\":\"" + base + "\",\"size\":" +
+                        String((uint32_t)f.size()) + "}";
+            }
+            f.close();
+        }
+        dir.close();
+    }
+    json += "]";
+    server.send(200, "application/json", json);
+}
+
+void RecorderServer::handleDownload() {
+    if (recording) {
+        server.send(503, "text/plain", "recording");
+        return;
+    }
+    String uri = server.uri();  // expect /rec/REC_NNN.wav
+    if (!uri.startsWith("/rec/")) {
+        server.send(404, "text/plain", "not found");
+        return;
+    }
+    String name = uri.substring(5);
+    // Guard against path traversal: basename only, must be a recording.
+    if (name.indexOf('/') >= 0 || !is_recording_file(name)) {
+        server.send(400, "text/plain", "bad name");
+        return;
+    }
+    String path = "/" + name;
+    if (!SD.exists(path)) {
+        server.send(404, "text/plain", "not found");
+        return;
+    }
+    File f = SD.open(path, FILE_READ);
+    if (!f) {
+        server.send(500, "text/plain", "open failed");
+        return;
+    }
+    server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+    server.streamFile(f, "audio/wav");
+    f.close();
+}
+
+void RecorderServer::handleRoot() {
+    server.send(200, "text/plain",
+                "otageLabs CoreS3 meeting recorder\n"
+                "GET /api/recordings   list recordings (JSON)\n"
+                "GET /rec/<name>       download a WAV\n");
+}
+
+}  // namespace Net

@@ -35,6 +35,7 @@ class AppRecorder : public PageBase {
     AppRecorderModel Model;
     lv_timer_t* timer;
     uint32_t last_sec;
+    int last_wifi;  // -1 unknown, 0 down, 1 up — only repaint on change
 };
 
 }  // namespace Page
