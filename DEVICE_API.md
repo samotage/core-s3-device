@@ -12,7 +12,36 @@ agent is the **client** that discovers it, lists recordings, and downloads them.
   Practical flow: bring the device back to the desk, plug it in (USB power),
   it auto-joins WiFi → the agent can reach it.
 
-## Endpoints
+## Device → Headspace notification (push)
+
+When the device joins WiFi (and after each recording stops) it announces
+un-uploaded recordings so Headspace can pull + transcribe them — zero operator action.
+
+`POST {HEADSPACE_NOTIFY_URL}` — e.g. `http://<mac-lan-ip>:15055/api/recorder/notify`
+(plain HTTP only; the ESP32 can't do TLS/Tailscale, so target the Mac's LAN bind).
+
+```json
+{
+  "device": "core-s3",
+  "address": "192.168.4.14",
+  "recordings": ["REC_002.wav", "REC_003.wav"]
+}
+```
+
+- `address` — the device's current IP. **Use this for the pull; don't store it** (DHCP).
+- `recordings` — un-acked, non-empty `REC_*.wav` basenames.
+
+Expected `200` response so the device can update its marker:
+
+```json
+{"pulled": ["REC_002.wav"], "skipped": ["REC_003.wav"]}
+```
+
+The device appends `pulled` names to `/UPLOADED.txt` on the SD card and never
+re-announces them; anything not in `pulled` is retried on the next tick (~30 s).
+The URL is compiled into the device's gitignored `secrets.h`.
+
+## Endpoints (Headspace → device pull)
 
 ### `GET /api/recordings`
 List the recordings currently on the SD card.
