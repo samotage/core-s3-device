@@ -119,6 +119,7 @@ void AppRecorder::onEvent(lv_event_t* event) {
         if (instance->Model.IsRecording()) {
             instance->Model.StopRecording();
             Net::Server.setRecording(false);  // re-open the HTTP server
+            Net::Server.requestNotify();      // announce the new recording to Headspace
             instance->View.SetSaved(instance->Model.LastFilename(),
                                     instance->last_sec);
         } else {
