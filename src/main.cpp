@@ -1,19 +1,56 @@
-#include <M5Unified.h>
+#include <Arduino.h>
+#include <FFat.h>
+#include <Wire.h>
+#include <BLEDevice.h>
+#include <nvs_flash.h>
+
+#include "config.h"
+#include "M5GFX.h"
+#include "M5Unified.h"
+#include "lvgl.h"
+#include "m5gfx_lvgl.h"
+#include "esp_camera.h"
+
+#include "App.h"
 
 void setup() {
-  auto cfg = M5.config();
-  M5.begin(cfg);
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
 
-  M5.Display.setTextSize(2);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setCursor(40, 100);
-  M5.Display.println("otageLabs core-s3");
+    Serial.begin(15200);
+    M5.begin();
 
-  Serial.println("CoreS3 boot OK");
+#if defined(M5CORES3)
+    Serial.printf("M5CoreS3 User Demo, Version: %s\r\n", DEMO_VERSION);
+#elif defined(M5CORES3SE)
+    Serial.printf("M5CoreS3SE User Demo, Version: %s\r\n", DEMO_VERSION);
+#endif
+
+    // BM8563 Init (clear INT)
+    M5.In_I2C.writeRegister8(0x51, 0x00, 0x00, 100000L);
+    M5.In_I2C.writeRegister8(0x51, 0x01, 0x00, 100000L);
+    M5.In_I2C.writeRegister8(0x51, 0x0D, 0x00, 100000L);
+
+    // AW9523 Control BOOST
+    M5.In_I2C.bitOn(AW9523_ADDR, 0x03, 0b10000000, 100000L);  // BOOST_EN
+
+#if MONKEY_TEST_ENABLE
+    M5.Speaker.setAllChannelVolume(0);
+#endif
+    M5.Display.setBrightness(60);
+
+    lv_init();
+    m5gfx_lvgl_init();
+
+    App_Init();
 }
 
 void loop() {
-  M5.update();
-  delay(100);
+
+    lv_timer_handler();
+    delay(10);
 }
