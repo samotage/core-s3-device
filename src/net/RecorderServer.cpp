@@ -63,14 +63,26 @@ void RecorderServer::loop() {
     // (state set by AppRecorder via setRecording()).
     if (recording) {
         if (!was_paused) {
-            Serial.println("[NET] paused (recording — yields to I2S capture)");
-            was_paused = true;
+            Serial.println("[NET] paused — WIFI_OFF (yielding radio to I2S capture)");
+            // Pausing only our loop wasn't enough: the underlying IDF WiFi task
+            // keeps retrying association in the background when the SSID isn't
+            // reachable (at meetings, off-home WiFi). That competes with the
+            // I2S DMA and crashes the device after ~13 min. Fully OFF the radio
+            // so no background WiFi work can run at all.
+            WiFi.mode(WIFI_OFF);
+            started     = false;  // mDNS + HTTP need to re-init when WiFi comes back
+            was_paused  = true;
         }
         return;
     }
     if (was_paused) {
-        Serial.println("[NET] resumed (recording stopped)");
+        Serial.println("[NET] resumed — re-enabling WiFi");
+        WiFi.mode(WIFI_STA);
+        WiFi.setHostname(REC_HOSTNAME);
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
         was_paused = false;
+        // started is false; the connected-and-not-started branch below will
+        // re-init mDNS + HTTP once association completes.
     }
 
     bool connected = (WiFi.status() == WL_CONNECTED);
