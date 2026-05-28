@@ -1,0 +1,10 @@
+schema: spec-driven
+
+context: |
+  Project: otageLabs CoreS3 Meeting Recorder
+  Hardware: M5Stack CoreS3 (ESP32-S3), ES7210 mic, microSD, 320x240 touch
+  Framework: PlatformIO + Arduino, M5Unified, LVGL 8.3
+  Audio: 16 kHz mono 16-bit PCM WAV to SD card
+  Network: WiFi STA, cloud upload via Cloudflare R2 + Workers
+  Transcription: Parakeet-mlx on Apple Silicon (Headspace-side)
+  Constraints: Single-threaded (no RTOS), 200 mAh battery, 16 MB flash
