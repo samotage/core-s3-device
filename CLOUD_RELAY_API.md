@@ -126,17 +126,26 @@ Empty body. The upload succeeded. R2 returns standard S3-compatible PUT response
 
 ### Upload Behaviour
 
-- **Chunked transfer:** The ESP32 Arduino HTTP client sends chunked by default for large bodies.
-  R2 accepts `Transfer-Encoding: chunked`. No special handling needed.
-- **Timeout:** Device should set a socket timeout of 120 seconds. At worst-case hotspot speed
-  (1 Mbps), a 115 MB file takes ~15 minutes — but the socket should not hang indefinitely
-  on a stalled connection.
+- **Content-Length required — no chunked transfer.** Presigned PUT URLs include
+  `Content-Length` in the signature. Sending `Transfer-Encoding: chunked` instead will
+  cause `SignatureDoesNotMatch` (403). The ESP32 HTTP client must set `Content-Length`
+  explicitly from the known file size and disable chunked encoding.
+- **Idle timeout, not total timeout.** Device should set a socket *idle* timeout of
+  120 seconds (no data sent or received for 120s = stalled connection, abort). The
+  total transfer time for a 115 MB file on a slow hotspot (1 Mbps) is ~15 minutes —
+  a total timeout would kill legitimate slow uploads.
 - **Resume:** Not supported in Phase 2a. A failed upload restarts from the beginning with a
   new presigned URL. R2 multipart upload can be added later if partial uploads become a
   problem at larger file sizes.
 - **Ack semantics:** Device writes filename to `/UPLOADED.txt` on SD **only** on 200 from the
   PUT. Same file, same semantics as the LAN pipeline. Un-acked files are retried on the
   next 30s tick.
+- **Failed upload observability.** On terminal upload failure (retries exhausted), the
+  device displays the filename and error on screen and keeps it in the un-acked set.
+  Files that permanently fail upload are never written to `/UPLOADED.txt` and will
+  appear in every upload cycle until the device is reflashed or the file is manually
+  removed from SD. At current volume (one device, operator is the user), screen
+  display is sufficient — no remote alerting needed in Phase 2a.
 
 ---
 
