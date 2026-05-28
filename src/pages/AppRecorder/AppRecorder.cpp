@@ -72,6 +72,30 @@ void AppRecorder::AttachEvent(lv_obj_t* obj, lv_event_code_t code) {
 }
 
 void AppRecorder::Update() {
+    // Serial debug trigger — bench-test only ('r' = start, 's' = stop).
+    // Same code path as the touch button. Not a network-facing surface; the
+    // over-the-network remote-start feature is parked in issue #1.
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == 'r' && !Model.IsRecording()) {
+            last_sec = 0;
+            if (Model.StartRecording()) {
+                Net::Server.setRecording(true);
+                View.SetRecording(0);
+                Serial.println("[REC] (serial) start ok");
+            } else {
+                View.SetError(LV_SYMBOL_WARNING " SD card error");
+                Serial.println("[REC] (serial) start FAILED");
+            }
+        } else if (c == 's' && Model.IsRecording()) {
+            Model.StopRecording();
+            Net::Server.setRecording(false);
+            Net::Server.requestNotify();
+            View.SetSaved(Model.LastFilename(), last_sec);
+            Serial.println("[REC] (serial) stop ok");
+        }
+    }
+
     // WiFi/reachability indicator — refresh whether idle or recording.
     int wifi = Net::Server.wifiConnected() ? 1 : 0;
     if (wifi != last_wifi) {
@@ -82,6 +106,15 @@ void AppRecorder::Update() {
     if (!Model.IsRecording()) return;
 
     Model.WriteChunk();
+
+    // If WriteChunk auto-rolled over to a new file (sustained mic failure
+    // recovered), notify Headspace so the just-finalised file gets pulled +
+    // transcribed; reset the displayed timer to track the new file from 0.
+    if (Model.RolloverHappened()) {
+        Net::Server.requestNotify();
+        last_sec = 0;
+    }
+
     View.SetLevel(Model.InputLevel());
 
     uint32_t sec = Model.RecordingSeconds();

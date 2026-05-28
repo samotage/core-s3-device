@@ -45,6 +45,12 @@ class AppRecorderModel {
     void StopRecording();
     bool WriteChunk();  // pull one mic chunk -> SD, update level + byte count
 
+    // Auto-rollover: finalise current file, reset the mic codec, start the next
+    // file — recovers from a silent M5.Mic.record() fault without user action.
+    // Called automatically from WriteChunk on a sustained failure streak.
+    bool RolloverFile();
+    bool RolloverHappened();  // returns + clears the pending flag (for the controller)
+
     bool IsRecording() { return recording; }
     uint32_t RecordingSeconds();
     const char* LastFilename() { return last_filename; }
@@ -61,6 +67,12 @@ class AppRecorderModel {
     char last_filename[24] = {0};
     bool sd_ready          = false;
     uint8_t level          = 0;
+
+    // Auto-rollover state: tracks the consecutive-mic-failure streak that signals
+    // the codec has silently faulted, and rate-limits rollover attempts.
+    uint32_t mic_fail_streak  = 0;
+    uint32_t last_rollover_ms = 0;
+    bool rolled_over_pending  = false;
 
     int FindNextFileNum();
     void WriteHeader();  // seek 0, write current sizes, return to append point

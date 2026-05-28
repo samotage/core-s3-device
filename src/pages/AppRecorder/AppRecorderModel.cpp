@@ -100,22 +100,30 @@ void AppRecorderModel::StopRecording() {
 bool AppRecorderModel::WriteChunk() {
     if (!recording) return false;
     if (!M5.Mic.record(rec_chunk, REC_CHUNK_SIZE, REC_SAMPLE_RATE)) {
-        // Diagnostic: surface silent mic failures. This was the cause of the
-        // ~6-min cut-off Sam saw — mic stops producing samples, recording state
-        // stays true, timer kept counting wall-clock while no bytes were
-        // written. Throttled to one log per 5 s so serial isn't flooded.
-        static uint32_t mic_fail_count = 0;
-        static uint32_t last_log_ms    = 0;
-        mic_fail_count++;
+        // Silent mic failure — the cause of the ~6-min cut-off. Track the streak;
+        // if it persists, auto-rollover (finalise this file, reset codec, start
+        // the next file) so the meeting keeps recording without user action.
+        mic_fail_streak++;
+        static uint32_t last_log_ms = 0;
         if (millis() - last_log_ms > 5000) {
-            Serial.printf("[REC] mic.record FAIL  count=%u  total_bytes=%u  "
+            Serial.printf("[REC] mic.record FAIL  streak=%u  total_bytes=%u  "
                           "audio_secs=%u\n",
-                          mic_fail_count, total_bytes,
+                          mic_fail_streak, total_bytes,
                           total_bytes / (REC_SAMPLE_RATE * 2));
             last_log_ms = millis();
         }
+        // ~30 consecutive failures @ 33 ms timer ≈ 1 s of dead air → roll over.
+        // Rate-limited so we don't tight-loop if the recovery itself fails.
+        const uint32_t FAIL_THRESHOLD = 30;
+        const uint32_t ROLLOVER_MIN_INTERVAL_MS = 10000;
+        if (mic_fail_streak >= FAIL_THRESHOLD &&
+            millis() - last_rollover_ms >= ROLLOVER_MIN_INTERVAL_MS) {
+            RolloverFile();
+        }
         return false;
     }
+    // Successful read clears the streak.
+    mic_fail_streak = 0;
 
     wav_file.write((uint8_t*)rec_chunk, REC_CHUNK_SIZE * sizeof(int16_t));
     total_bytes += REC_CHUNK_SIZE * sizeof(int16_t);
@@ -145,4 +153,37 @@ uint32_t AppRecorderModel::RecordingSeconds() {
     // the mic silently stops producing samples — the timer will freeze at the
     // last good second instead of climbing while no bytes are being written.
     return total_bytes / (REC_SAMPLE_RATE * 2);
+}
+
+// Recover from a silent mic-codec fault mid-recording: finalise the current
+// file, reset the I2S/mic path (without touching the speaker — that would
+// release the codec entirely), and open the next REC_NNN.wav. The meeting
+// continues as a chain of back-to-back files, no user action required.
+bool AppRecorderModel::RolloverFile() {
+    if (!recording) return false;
+    Serial.printf("[REC] AUTO-ROLLOVER triggered  streak=%u  bytes=%u\n",
+                  mic_fail_streak, total_bytes);
+
+    StopRecording();           // finalises the WAV, increments file_num
+
+    M5.Mic.end();
+    delay(50);                 // brief settle so the I2S driver tears down clean
+    M5.Mic.begin();
+
+    bool ok = StartRecording();
+    if (ok) {
+        mic_fail_streak     = 0;
+        last_rollover_ms    = millis();
+        rolled_over_pending = true;  // signal controller to notify the new file
+        Serial.printf("[REC] AUTO-ROLLOVER -> %s\n", last_filename);
+    } else {
+        Serial.println("[REC] AUTO-ROLLOVER failed (StartRecording returned false)");
+    }
+    return ok;
+}
+
+bool AppRecorderModel::RolloverHappened() {
+    bool r = rolled_over_pending;
+    rolled_over_pending = false;
+    return r;
 }
