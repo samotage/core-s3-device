@@ -52,6 +52,27 @@ void RecorderServer::begin() {
 void RecorderServer::loop() {
     if (!creds_present()) return;
 
+    // Suspend all WiFi/HTTP work while recording so it can't compete with the
+    // I2S real-time capture loop. WiFi.reconnect() in particular blocks the
+    // single Arduino task for seconds at a time — during which M5.Mic.record()
+    // isn't drained and the I2S DMA overflows. That was the most likely cause
+    // of the ~6-min silent-mic failure at off-home meetings (constant reconnect
+    // attempts -> DMA starvation -> codec fault). On-home/bench WiFi stays
+    // connected the whole time so there are no reconnects, hence the bench
+    // test stayed clean for 9 min. Server resumes the instant recording stops
+    // (state set by AppRecorder via setRecording()).
+    if (recording) {
+        if (!was_paused) {
+            Serial.println("[NET] paused (recording — yields to I2S capture)");
+            was_paused = true;
+        }
+        return;
+    }
+    if (was_paused) {
+        Serial.println("[NET] resumed (recording stopped)");
+        was_paused = false;
+    }
+
     bool connected = (WiFi.status() == WL_CONNECTED);
 
     // Bring up mDNS + HTTP once, the first time WiFi comes up.

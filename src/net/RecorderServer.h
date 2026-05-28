@@ -27,6 +27,7 @@ class RecorderServer {
     bool recording      = false;
     bool started        = false;  // mDNS + HTTP started (once, on first connect)
     bool notify_pending = false;
+    bool was_paused     = false;  // tracks the "paused during recording" state
     uint32_t last_retry  = 0;
     uint32_t last_notify = 0;
 
