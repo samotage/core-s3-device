@@ -99,7 +99,23 @@ void AppRecorderModel::StopRecording() {
 
 bool AppRecorderModel::WriteChunk() {
     if (!recording) return false;
-    if (!M5.Mic.record(rec_chunk, REC_CHUNK_SIZE, REC_SAMPLE_RATE)) return false;
+    if (!M5.Mic.record(rec_chunk, REC_CHUNK_SIZE, REC_SAMPLE_RATE)) {
+        // Diagnostic: surface silent mic failures. This was the cause of the
+        // ~6-min cut-off Sam saw — mic stops producing samples, recording state
+        // stays true, timer kept counting wall-clock while no bytes were
+        // written. Throttled to one log per 5 s so serial isn't flooded.
+        static uint32_t mic_fail_count = 0;
+        static uint32_t last_log_ms    = 0;
+        mic_fail_count++;
+        if (millis() - last_log_ms > 5000) {
+            Serial.printf("[REC] mic.record FAIL  count=%u  total_bytes=%u  "
+                          "audio_secs=%u\n",
+                          mic_fail_count, total_bytes,
+                          total_bytes / (REC_SAMPLE_RATE * 2));
+            last_log_ms = millis();
+        }
+        return false;
+    }
 
     wav_file.write((uint8_t*)rec_chunk, REC_CHUNK_SIZE * sizeof(int16_t));
     total_bytes += REC_CHUNK_SIZE * sizeof(int16_t);
@@ -125,5 +141,8 @@ bool AppRecorderModel::WriteChunk() {
 
 uint32_t AppRecorderModel::RecordingSeconds() {
     if (!recording) return 0;
-    return (millis() - rec_start_ms) / 1000;
+    // Return actual audio captured (not wall-clock), so the UI never lies if
+    // the mic silently stops producing samples — the timer will freeze at the
+    // last good second instead of climbing while no bytes are being written.
+    return total_bytes / (REC_SAMPLE_RATE * 2);
 }
