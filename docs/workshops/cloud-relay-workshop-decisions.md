@@ -67,7 +67,7 @@ Sam opens voice PWA → transcript visible
 
 ## Integration Contracts
 
-Four boundaries identified and spec'd in `CLOUD_RELAY_API.md`:
+Four boundaries identified and spec'd in [`cloud-relay-api.md`](../api/cloud-relay-api.md):
 
 | Boundary | Path | Summary |
 |----------|------|---------|
@@ -88,5 +88,5 @@ Four boundaries identified and spec'd in `CLOUD_RELAY_API.md`:
 | O2 | **Periodic dead letter sweep** — Headspace should check `_notify_failed/` prefix every 10-15 minutes (not just on startup). One LIST call, almost always empty. | Con |
 | O3 | **Firmware flash budget** — 94.7% of 16 MB app partition used. HTTPS client + multi-network config likely requires trimming AppCamera/factory demo. | Chip |
 | O4 | **Multi-network firmware config** — Priority-ordered WiFi network list (home WiFi + hotspot) in `secrets.h`. | Chip |
-| O5 | **Contract document finalisation** — `CLOUD_RELAY_API.md` needs O1 and O2 folded in before it's final. | Nico |
+| O5 | **Contract document finalisation** — `docs/api/cloud-relay-api.md` needs O1 and O2 folded in before it's final. | Nico |
 | O6 | **Headspace recorder route changes** — New handler (or mode switch) to pull from R2 instead of LAN IP. | Con |

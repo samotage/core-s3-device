@@ -7,7 +7,7 @@ device is off the home network.
 **Architecture decision:** Batch push. Device records to SD, uploads after stop.
 Cloud notifies Headspace, Headspace pulls from R2 and transcribes locally.
 
-**Supersedes:** The LAN notify-pull contract in `DEVICE_API.md` remains valid for
+**Supersedes:** The LAN notify-pull contract in `device-api.md` remains valid for
 local dev/debug (compile flag). This document defines the production cloud path.
 
 ---
@@ -395,7 +395,7 @@ Headspace transcribes.
 
 The cloud pipeline does **not** replace the LAN pipeline — both can coexist.
 
-- **LAN path** (`DEVICE_API.md`): Device notifies Headspace directly on LAN, Headspace
+- **LAN path** (`device-api.md`): Device notifies Headspace directly on LAN, Headspace
   pulls from device. Used for dev/debug with a compile flag.
 - **Cloud path** (this document): Device pushes to R2, Worker notifies Headspace,
   Headspace pulls from R2. Production path.
