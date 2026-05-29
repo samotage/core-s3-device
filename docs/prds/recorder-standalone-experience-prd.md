@@ -1,3 +1,9 @@
+---
+validation:
+  status: valid
+  validated_at: '2026-05-29T14:01:09+10:00'
+---
+
 ## Product Requirements Document (PRD) — Recorder Standalone Experience
 
 **Project:** CoreS3 Meeting Recorder
