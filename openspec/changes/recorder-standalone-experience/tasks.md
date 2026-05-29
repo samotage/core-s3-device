@@ -125,3 +125,41 @@
 - [ ] 4.4 Brand styling matches existing palette (`COL_BG`, `COL_COPPER`, `COL_RED`, `COL_OFFWHITE`, `COL_GREY`, `COL_SURFACE`) (PRD NFR4).
 - [ ] 4.5 Confirm factory demo pages remain compiled-in but unreachable from navigation (PRD FR11).
 - [ ] 4.6 Confirm out-of-scope items are not implemented (cloud upload, NTP, playback, file detail, transcription, BLE, LED, configurable sleep timeout in UI, mic gain in UI).
+
+## Pre-Build Contracts — "Verify By" criteria
+
+- 2.A.1 Verify by: `g_app_recorder_model` global declared in `App.h`; instantiated in `App_Init`; `AppRecorder` page references it via pointer; firmware compiles.
+- 2.A.2 Verify by: `AppRecorder::onViewUnload()` no longer calls `MicEnd()`; navigation away from recorder while recording leaves `IsRecording()` true.
+- 2.A.3 Verify by: `IsRecording()`, `RecordingSeconds()`, `InputLevel()` accessible from the status bar widget and other pages via the shared model.
+- 2.A.4 Verify by: existing 33ms timer cadence retained on the recorder page; no new long-running work added to it.
+- 2.B.1 Verify by: `StatusBar.{cpp,h}` exists in `src/pages/_widgets/`; offered on each page via a single `Attach(parent)` call; compiles.
+- 2.B.2 Verify by: LiPo lookup table in `StatusBar.cpp`; unit test under `test/test_native/` covers boundary points.
+- 2.B.3 Verify by: charging icon toggled by `AxpBatIsCharging()` return value at refresh tick.
+- 2.B.4 Verify by: WiFi icon at >= 24px height (vs old 14px).
+- 2.B.5 Verify by: red dot only rendered when `g_app_recorder_model->IsRecording()` true AND the page is not `AppRecorder` (status bar consults a `setRecorderPage(bool)` flag set by AppRecorder lifecycle hooks).
+- 2.B.6 Verify by: lv_timer at 5000ms in the StatusBar; no calls into the mic path from this timer.
+- 2.B.7 Verify by: `STATUS_BAR_REFRESH_MS` define in `include/config.h`.
+- 2.C.1 Verify by: `HomeMenuView::ui` exposes 5 buttons labelled Recorder, Files, Settings, Sleep, Power Off.
+- 2.C.2 Verify by: each click routes via `PageManager::Replace()` to the named page (or executes sleep/power-off helper).
+- 2.C.3 Verify by: `AppFactory.cpp` still includes/registers demo pages, but `HomeMenu` no longer creates buttons for them.
+- 2.C.4 Verify by: every sub-page renders a back button (Menu) and clicking it navigates to `Pages/HomeMenu`.
+- 2.C.5 Verify by: Sleep button is hidden / disabled when `g_app_recorder_model->IsRecording()` is true.
+- 2.D.1 Verify by: logo image asset (`otagelabs_logo`) is rendered as the hero element on recorder screen.
+- 2.D.2 Verify by: record button is a rounded rectangle with radius >= 24px in COL_COPPER, sized as a pill (~180x52).
+- 2.D.3 Verify by: idle state has only status bar + logo + button visible.
+- 2.D.4 Verify by: recording state shows MM:SS timer + VU level bar; button bg becomes COL_RED, label "Stop".
+- 2.D.5 Verify by: no `Tap to record - X GB free` text on recorder; no `free_mb` parameter shown.
+- 2.E.1 Verify by: `src/pages/AppFiles/{AppFiles,AppFilesView,AppFilesModel}.{cpp,h}` exist and `AppFactory.cpp` registers `AppFiles`.
+- 2.E.2-4 Verify by: AppFiles view shows file count, used/total storage, est. time.
+- 2.E.5-7 Verify by: button + msgbox-confirmation flow performs delete and refreshes stats.
+- 2.E.8 Verify by: file count happens once on page load, not per frame; delete shows "Deleting…" overlay during operation.
+- 2.E.9 Verify by: Back button navigates to `Pages/HomeMenu`.
+- 2.F.1-4 Verify by: `src/pages/AppSettings/{AppSettings,AppSettingsView}.{cpp,h}` exist; brightness slider drives `M5.Display.setBrightness()`; Back button to HomeMenu; selected brightness used by app at boot.
+- 2.G.1-3 Verify by: `SCREEN_IDLE_TIMEOUT_MS` in config.h; app-level idle tracker turns backlight off after timeout; touch wakes via LVGL touch read hook.
+- 2.G.4 Verify by: backlight changes do not call into Mic/SD modules.
+- 2.H.1-5 Verify by: helper in AppPowerModel calls `esp_deep_sleep_start()` after enabling wake sources (touch ext1 + power-key ext1); wired to Sleep entry; AppRecorder is the boot landing page.
+- 2.H.6 Verify by: Sleep entry blocked when recording.
+- 2.H.7 Verify by: recorder model `MicEnd()` + SD close performed before deep sleep entry.
+- 2.I.1-3 Verify by: AXP2101 power-off helper writes the shutdown bit; wired to PowerOff entry behind msgbox; auto-saves recording first.
+- 2.J.1-4 Verify by: critical-battery predicate in AppPowerModel; called from recorder loop; auto-saves and shuts down on threshold breach.
+- 2.K.1-3 Verify by: `STORAGE_FULL_THRESHOLD_BYTES` in config.h; record button disabled when below threshold; storage-full status message shown.
