@@ -10,10 +10,10 @@ void AppFiles::onCustomAttrConfig() { LV_LOG_USER(__func__); }
 void AppFiles::onViewLoad() {
     LV_LOG_USER(__func__);
     View.Create(_root);
-    lv_obj_set_user_data(View.ui.btn_delete10, this);
+    // The event callback's user_data is passed straight to lv_event_get_user_data
+    // inside onEvent — no need to also call lv_obj_set_user_data.
     lv_obj_add_event_cb(View.ui.btn_delete10, onEvent, LV_EVENT_CLICKED, this);
-    lv_obj_set_user_data(View.ui.btn_menu, this);
-    lv_obj_add_event_cb(View.ui.btn_menu, onEvent, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(View.ui.btn_menu,     onEvent, LV_EVENT_CLICKED, this);
 }
 
 void AppFiles::onViewDidLoad()        { LV_LOG_USER(__func__); }
@@ -35,14 +35,21 @@ void AppFiles::RefreshStats() {
 }
 
 struct DelCtx { AppFiles* page; };
+
+// Free ctx on msgbox deletion — covers the close-[X] path that never fires
+// LV_EVENT_VALUE_CHANGED. Without this, hitting close leaks the ctx.
+static void onDelCleanup(lv_event_t* e) {
+    DelCtx* ctx = (DelCtx*)lv_event_get_user_data(e);
+    if (ctx) delete ctx;
+}
+
 static void onConfirmDelete(lv_event_t* e) {
     lv_obj_t* mbox = lv_event_get_current_target(e);
     DelCtx* ctx = (DelCtx*)lv_event_get_user_data(e);
     uint16_t btn_id = lv_msgbox_get_active_btn(mbox);
     bool yes = (btn_id == 0);
     AppFiles* page = ctx->page;
-    delete ctx;
-    lv_msgbox_close(mbox);
+    lv_msgbox_close(mbox);  // triggers onDelCleanup which frees ctx
     if (yes && page) {
         page->View.SetBusy(true);
         lv_refr_now(NULL);
@@ -68,6 +75,7 @@ void AppFiles::onEvent(lv_event_t* event) {
                                           "Delete 10 oldest recordings?", btns, true);
         DelCtx* ctx = new DelCtx{instance};
         lv_obj_add_event_cb(mbox, onConfirmDelete, LV_EVENT_VALUE_CHANGED, ctx);
+        lv_obj_add_event_cb(mbox, onDelCleanup,    LV_EVENT_DELETE,        ctx);
         lv_obj_center(mbox);
     }
 }

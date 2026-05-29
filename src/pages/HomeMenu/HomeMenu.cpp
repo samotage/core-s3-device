@@ -63,6 +63,14 @@ struct ConfirmCtx {
     HmAction action;
 };
 
+// Free ctx on msgbox deletion — fires whether the user picked a button (we
+// close ourselves, lv_msgbox_close → delete) or hit the close [X] (no
+// VALUE_CHANGED). Without this, the close-X path leaks ctx.
+static void onConfirmCleanup(lv_event_t* e) {
+    ConfirmCtx* ctx = (ConfirmCtx*)lv_event_get_user_data(e);
+    if (ctx) delete ctx;
+}
+
 static void onConfirmEvent(lv_event_t* e) {
     lv_obj_t* mbox = lv_event_get_current_target(e);
     ConfirmCtx* ctx = (ConfirmCtx*)lv_event_get_user_data(e);
@@ -70,8 +78,7 @@ static void onConfirmEvent(lv_event_t* e) {
     bool yes = (btn_id == 0);  // "Yes" is the first button in our static map
     HmAction action = ctx->action;
     HomeMenu* page = ctx->page;
-    delete ctx;
-    lv_msgbox_close(mbox);
+    lv_msgbox_close(mbox);  // triggers onConfirmCleanup which frees ctx
 
     if (yes && action == HmAction::PowerOff) {
         // FR29: if recording, finalise the WAV before shutdown.
@@ -89,7 +96,8 @@ static void showConfirm(HomeMenu* page, const char* title, HmAction action) {
     static const char* btns[] = {"Yes", "No", ""};
     lv_obj_t* mbox = lv_msgbox_create(NULL, "Confirm", title, btns, true);
     ConfirmCtx* ctx = new ConfirmCtx{page, action};
-    lv_obj_add_event_cb(mbox, onConfirmEvent, LV_EVENT_VALUE_CHANGED, ctx);
+    lv_obj_add_event_cb(mbox, onConfirmEvent,   LV_EVENT_VALUE_CHANGED, ctx);
+    lv_obj_add_event_cb(mbox, onConfirmCleanup, LV_EVENT_DELETE,        ctx);
     lv_obj_center(mbox);
 }
 

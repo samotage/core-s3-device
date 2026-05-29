@@ -51,7 +51,9 @@ bool AppRecorder::StorageFull() {
     // Skip if SD not yet ready — InitSD() returns false and we handle below.
     if (!Model()->IsSDCardPresent()) return false;
     if (!Model()->InitSD()) return false;
-    uint64_t free_bytes = (uint64_t)SD.totalBytes() - (uint64_t)SD.usedBytes();
+    uint64_t total = (uint64_t)SD.totalBytes();
+    uint64_t used  = (uint64_t)SD.usedBytes();
+    uint64_t free_bytes = (total > used) ? (total - used) : 0;  // guard underflow
     return free_bytes < STORAGE_FULL_THRESHOLD_BYTES;
 }
 
@@ -112,14 +114,22 @@ void AppRecorder::Update() {
 
     if (!Model()->IsRecording()) {
         // FR33: re-check storage-full state when idle so the screen updates if
-        // the user just deleted files via the Files page.
-        bool full = StorageFull();
-        if (full && !last_storage_full) {
-            last_storage_full = true;
-            View.SetStorageFull();
-        } else if (!full && last_storage_full) {
-            last_storage_full = false;
-            View.SetIdle();
+        // the user just deleted files via the Files page. Throttle to ~1Hz —
+        // the Update() timer runs at the 33ms mic-DMA cadence, but SD.totalBytes
+        // / usedBytes are expensive (FAT cluster walk); polling them every
+        // tick while idle is wasted work.
+        static uint32_t last_storage_check_ms = 0;
+        uint32_t now_ms = millis();
+        if (now_ms - last_storage_check_ms >= 1000) {
+            last_storage_check_ms = now_ms;
+            bool full = StorageFull();
+            if (full && !last_storage_full) {
+                last_storage_full = true;
+                View.SetStorageFull();
+            } else if (!full && last_storage_full) {
+                last_storage_full = false;
+                View.SetIdle();
+            }
         }
         return;
     }
