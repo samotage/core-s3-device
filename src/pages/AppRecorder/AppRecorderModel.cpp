@@ -24,7 +24,11 @@ bool AppRecorderModel::InitSD() {
     sd_ready = SD.begin(GPIO_NUM_4, SPI, 25000000);
     if (sd_ready) {
         file_num = FindNextFileNum();
-        Serial.printf("[REC] SD ready, next file: REC_%03d.wav\n", file_num);
+        // Log free space too — surfaces orphan-cluster corruption / disk-full
+        // states early (a near-zero free total = stop trusting the card).
+        uint64_t free_mb = SDFreeMB();
+        Serial.printf("[REC] SD ready, next file: REC_%03d.wav  (free: %llu MB)\n",
+                      file_num, free_mb);
     } else {
         Serial.println("[REC] SD mount failed");
     }
@@ -125,8 +129,21 @@ bool AppRecorderModel::WriteChunk() {
     // Successful read clears the streak.
     mic_fail_streak = 0;
 
-    wav_file.write((uint8_t*)rec_chunk, REC_CHUNK_SIZE * sizeof(int16_t));
-    total_bytes += REC_CHUNK_SIZE * sizeof(int16_t);
+    // SD safety: check the SD write actually persisted the bytes. The crash-
+    // corrupted-FAT scenario (50-min YouTube recording lost) returned
+    // "success" from SD.open + claimed bytes written, but the file was 0 on
+    // disk. If write() ever returns short, stop the recording immediately so
+    // we don't capture into the void.
+    const size_t want = REC_CHUNK_SIZE * sizeof(int16_t);
+    const size_t got  = wav_file.write((uint8_t*)rec_chunk, want);
+    if (got != want) {
+        Serial.printf("[REC] SD WRITE SHORT — expected %u got %u — STOPPING "
+                      "(filesystem fault, total so far %u bytes)\n",
+                      (unsigned)want, (unsigned)got, total_bytes);
+        recording = false;  // truthful timer freezes; controller next tick sees idle
+        return false;
+    }
+    total_bytes += got;
 
     // Peak level for the VU meter (0..100).
     int32_t peak = 0;
