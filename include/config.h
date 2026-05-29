@@ -36,4 +36,23 @@
 
 #define MONKEY_TEST_ENABLE 0
 
+// --- Recorder standalone experience ---------------------------------------
+// Screen auto-off timeout (FR19): backlight off after this many ms idle.
+#define SCREEN_IDLE_TIMEOUT_MS 60000
+
+// Status bar refresh cadence (NFR2): >= 5s. Picked to not disrupt mic DMA.
+#define STATUS_BAR_REFRESH_MS  5000
+
+// Storage-full threshold (FR33): block recording below this many free bytes.
+#define STORAGE_FULL_THRESHOLD_BYTES 5000000ULL
+
+// Critical-battery threshold (FR31): trip auto-save + shutdown at this point.
+// Both percent and voltage are provided; predicate ORs them so either signal
+// (whichever is more reliable on the bench at the time) can fire the trip.
+#define CRITICAL_BATTERY_PERCENT 8
+#define CRITICAL_BATTERY_VOLTAGE_MV 3300
+
+// Default brightness on boot (Settings page overrides at runtime).
+#define DEFAULT_BRIGHTNESS 80
+
 #endif  // __CONFIG_H

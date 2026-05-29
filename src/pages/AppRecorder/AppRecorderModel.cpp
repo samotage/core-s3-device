@@ -3,6 +3,12 @@
 
 using namespace Page;
 
+// App-level recording-model singleton. Defined here, declared extern in the
+// header. App_Init() assigns; pages reference via the pointer.
+namespace Page {
+AppRecorderModel* g_app_recorder_model = nullptr;
+}
+
 void AppRecorderModel::MicBegin() {
     M5.Speaker.end();
     M5.Mic.begin();

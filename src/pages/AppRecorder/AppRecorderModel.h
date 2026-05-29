@@ -78,6 +78,11 @@ class AppRecorderModel {
     void WriteHeader();  // seek 0, write current sizes, return to append point
 };
 
+// App-level singleton: lives across page navigation so recording survives
+// switching to Files / Settings / Menu. Created in App_Init(), torn down in
+// App_Uninit(). Pages READ from this pointer — they MUST NOT own its lifecycle.
+extern AppRecorderModel* g_app_recorder_model;
+
 }  // namespace Page
 
 #endif

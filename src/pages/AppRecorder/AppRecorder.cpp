@@ -1,67 +1,84 @@
 #include "AppRecorder.h"
+#include "../AppPower/AppPowerModel.h"
 #include "../../net/RecorderServer.h"
+#include <SD.h>
 
 using namespace Page;
 
-AppRecorder::AppRecorder() : timer(nullptr), last_sec(0), last_wifi(-1) {}
+AppRecorder::AppRecorder()
+    : timer(nullptr), last_sec(0), last_storage_full(false) {}
 
 AppRecorder::~AppRecorder() {}
 
-void AppRecorder::onCustomAttrConfig() {
-    LV_LOG_USER(__func__);
-}
+void AppRecorder::onCustomAttrConfig() { LV_LOG_USER(__func__); }
 
 void AppRecorder::onViewLoad() {
     LV_LOG_USER(__func__);
     View.Create(_root);
 
     AttachEvent(_root);
-    AttachEvent(View.ui.btn_record, LV_EVENT_CLICKED);
+    AttachEvent(View.ui.btn_record,   LV_EVENT_CLICKED);
+    AttachEvent(View.ui.btn_menu,     LV_EVENT_CLICKED);
+    AttachEvent(View.ui.btn_to_files, LV_EVENT_CLICKED);
 
-    Model.MicBegin();
+    // FR35: model is owned by App_Init, not the page. We just attach the mic
+    // path if it's not already active. MicBegin() is idempotent for our needs.
+    if (Model()) Model()->MicBegin();
     ShowIdle();
 }
 
-void AppRecorder::onViewDidLoad() {
-    LV_LOG_USER(__func__);
-}
+void AppRecorder::onViewDidLoad() { LV_LOG_USER(__func__); }
 
 void AppRecorder::onViewWillAppear() {
     LV_LOG_USER(__func__);
-    // ~33ms cadence: fast enough to drain the mic DMA buffer in real time.
-    timer = lv_timer_create(onTimerUpdate, 33, this);
+    timer = lv_timer_create(onTimerUpdate, 33, this);  // mic DMA cadence
 }
 
-void AppRecorder::onViewDidAppear() {
-    LV_LOG_USER(__func__);
-}
-
-void AppRecorder::onViewWillDisappear() {
-    LV_LOG_USER(__func__);
-}
-
-void AppRecorder::onViewDidDisappear() {
-    LV_LOG_USER(__func__);
-    lv_timer_del(timer);
-}
+void AppRecorder::onViewDidAppear()    { LV_LOG_USER(__func__); }
+void AppRecorder::onViewWillDisappear(){ LV_LOG_USER(__func__); }
+void AppRecorder::onViewDidDisappear() { LV_LOG_USER(__func__); lv_timer_del(timer); }
 
 void AppRecorder::onViewUnload() {
     LV_LOG_USER(__func__);
     View.Delete();
-    Model.MicEnd();
+    // FR35: do NOT call Model()->MicEnd() here. Recording must survive page nav.
 }
 
-void AppRecorder::onViewDidUnload() {
-    LV_LOG_USER(__func__);
+void AppRecorder::onViewDidUnload() { LV_LOG_USER(__func__); }
+
+bool AppRecorder::StorageFull() {
+    if (!Model()) return false;
+    // Skip if SD not yet ready — InitSD() returns false and we handle below.
+    if (!Model()->IsSDCardPresent()) return false;
+    if (!Model()->InitSD()) return false;
+    uint64_t free_bytes = (uint64_t)SD.totalBytes() - (uint64_t)SD.usedBytes();
+    return free_bytes < STORAGE_FULL_THRESHOLD_BYTES;
 }
 
 void AppRecorder::ShowIdle() {
-    bool present = Model.IsSDCardPresent();
-    if (present && Model.InitSD()) {
-        View.SetIdle(true, Model.SDFreeMB());
-    } else {
-        View.SetIdle(present, 0);
+    if (!Model()) return;
+    if (Model()->IsRecording()) {
+        // Came back to the page while a recording is in progress.
+        last_sec = Model()->RecordingSeconds();
+        View.SetRecording(last_sec);
+        return;
     }
+    bool present = Model()->IsSDCardPresent();
+    if (!present) {
+        View.SetError("Insert SD card");
+        return;
+    }
+    if (!Model()->InitSD()) {
+        View.SetError("SD card error");
+        return;
+    }
+    if (StorageFull()) {
+        last_storage_full = true;
+        View.SetStorageFull();
+        return;
+    }
+    last_storage_full = false;
+    View.SetIdle();
 }
 
 void AppRecorder::AttachEvent(lv_obj_t* obj, lv_event_code_t code) {
@@ -72,52 +89,65 @@ void AppRecorder::AttachEvent(lv_obj_t* obj, lv_event_code_t code) {
 }
 
 void AppRecorder::Update() {
-    // Serial debug trigger — bench-test only ('r' = start, 's' = stop).
-    // Same code path as the touch button. Not a network-facing surface; the
-    // over-the-network remote-start feature is parked in issue #1.
+    if (!Model()) return;
+
+    // Serial-control bench triggers (unchanged).
     while (Serial.available()) {
         char c = Serial.read();
-        if (c == 'r' && !Model.IsRecording()) {
+        if (c == 'r' && !Model()->IsRecording() && !StorageFull()) {
             last_sec = 0;
-            if (Model.StartRecording()) {
+            if (Model()->StartRecording()) {
                 Net::Server.setRecording(true);
                 View.SetRecording(0);
-                Serial.println("[REC] (serial) start ok");
             } else {
                 View.SetError(LV_SYMBOL_WARNING " SD card error");
-                Serial.println("[REC] (serial) start FAILED");
             }
-        } else if (c == 's' && Model.IsRecording()) {
-            Model.StopRecording();
+        } else if (c == 's' && Model()->IsRecording()) {
+            Model()->StopRecording();
             Net::Server.setRecording(false);
             Net::Server.requestNotify();
-            View.SetSaved(Model.LastFilename(), last_sec);
-            Serial.println("[REC] (serial) stop ok");
+            View.SetSaved(Model()->LastFilename(), last_sec);
         }
     }
 
-    // WiFi/reachability indicator — refresh whether idle or recording.
-    int wifi = Net::Server.wifiConnected() ? 1 : 0;
-    if (wifi != last_wifi) {
-        last_wifi = wifi;
-        View.SetWifi(wifi == 1);
+    if (!Model()->IsRecording()) {
+        // FR33: re-check storage-full state when idle so the screen updates if
+        // the user just deleted files via the Files page.
+        bool full = StorageFull();
+        if (full && !last_storage_full) {
+            last_storage_full = true;
+            View.SetStorageFull();
+        } else if (!full && last_storage_full) {
+            last_storage_full = false;
+            View.SetIdle();
+        }
+        return;
     }
 
-    if (!Model.IsRecording()) return;
+    Model()->WriteChunk();
 
-    Model.WriteChunk();
-
-    // If WriteChunk auto-rolled over to a new file (sustained mic failure
-    // recovered), notify Headspace so the just-finalised file gets pulled +
-    // transcribed; reset the displayed timer to track the new file from 0.
-    if (Model.RolloverHappened()) {
+    if (Model()->RolloverHappened()) {
         Net::Server.requestNotify();
         last_sec = 0;
     }
 
-    View.SetLevel(Model.InputLevel());
+    // FR30-FR32: critical-battery auto-save during recording.
+    static uint32_t last_batt_check = 0;
+    uint32_t now = millis();
+    if (now - last_batt_check >= 5000) {
+        last_batt_check = now;
+        AppPowerModel pm;
+        if (pm.IsCriticalBattery()) {
+            Serial.println("[REC] CRITICAL BATTERY — auto-save + shutdown");
+            Model()->StopRecording();
+            Net::Server.setRecording(false);
+            pm.PowerOff();
+        }
+    }
 
-    uint32_t sec = Model.RecordingSeconds();
+    View.SetLevel(Model()->InputLevel());
+
+    uint32_t sec = Model()->RecordingSeconds();
     if (sec != last_sec) {
         last_sec = sec;
         View.SetRecording(sec);
@@ -135,30 +165,32 @@ void AppRecorder::onEvent(lv_event_t* event) {
 
     lv_obj_t* obj        = lv_event_get_current_target(event);
     lv_event_code_t code = lv_event_get_code(event);
+    if (code != LV_EVENT_CLICKED) return;
 
-    if (obj == instance->_root) {
-        // Hidden gesture: swipe down (over the background/logo) opens the
-        // factory hardware demo. Only when idle, so it can't cut a meeting.
-        if (code == LV_EVENT_GESTURE) {
-            lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
-            if (dir == LV_DIR_BOTTOM && !instance->Model.IsRecording()) {
-                instance->_Manager->Replace("Pages/HomeMenu");
-            }
-        }
+    if (obj == instance->View.ui.btn_menu) {
+        instance->_Manager->Replace("Pages/HomeMenu");
         return;
     }
-
-    if (code == LV_EVENT_CLICKED && obj == instance->View.ui.btn_record) {
-        if (instance->Model.IsRecording()) {
-            instance->Model.StopRecording();
-            Net::Server.setRecording(false);  // re-open the HTTP server
-            Net::Server.requestNotify();      // announce the new recording to Headspace
-            instance->View.SetSaved(instance->Model.LastFilename(),
+    if (obj == instance->View.ui.btn_to_files) {
+        instance->_Manager->Replace("Pages/AppFiles");
+        return;
+    }
+    if (obj == instance->View.ui.btn_record) {
+        if (!instance->Model()) return;
+        if (instance->Model()->IsRecording()) {
+            instance->Model()->StopRecording();
+            Net::Server.setRecording(false);
+            Net::Server.requestNotify();
+            instance->View.SetSaved(instance->Model()->LastFilename(),
                                     instance->last_sec);
         } else {
+            if (instance->StorageFull()) {
+                instance->View.SetStorageFull();
+                return;
+            }
             instance->last_sec = 0;
-            if (instance->Model.StartRecording()) {
-                Net::Server.setRecording(true);  // pause serving during capture
+            if (instance->Model()->StartRecording()) {
+                Net::Server.setRecording(true);
                 instance->View.SetRecording(0);
             } else {
                 instance->View.SetError(LV_SYMBOL_WARNING " SD card error");

@@ -13,6 +13,8 @@
 
 #include "App.h"
 #include "net/RecorderServer.h"
+#include "pages/AppSettings/AppSettings.h"
+#include "pages/AppPower/AppPowerModel.h"
 
 void setup() {
     esp_err_t ret = nvs_flash_init();
@@ -47,7 +49,16 @@ void setup() {
 #if MONKEY_TEST_ENABLE
     M5.Speaker.setAllChannelVolume(0);
 #endif
-    M5.Display.setBrightness(60);
+    // Brightness honours the persisted Settings value (Page::g_app_brightness)
+    // — defaults to DEFAULT_BRIGHTNESS until the user touches the slider.
+    M5.Display.setBrightness(Page::GetCurrentBrightness());
+
+    // Make sure the AXP2101 ADC is sampling so the status bar gets real
+    // battery readings from boot (otherwise vbat stays at last-cached 0).
+    {
+        Page::AppPowerModel pm;
+        pm.AxpAdcEnable();
+    }
 
     lv_init();
     m5gfx_lvgl_init();
