@@ -1,10 +1,40 @@
 #include "PageManager.h"
 #include "res/ResourcePool.h"
 #include "pages/AppFactory.h"
+#include "pages/AppRecorder/AppRecorderModel.h"
+#include "pages/AppSettings/AppSettings.h"
+#include "M5Unified.h"
+#include "config.h"
+
+// Screen auto-off state (FR19-FR21). LVGL tracks input inactivity via
+// lv_disp_get_inactive_time(); we just decide when to dim and when to wake.
+static bool g_backlight_on = true;
+
+// Polled every 200 ms: when inactive > SCREEN_IDLE_TIMEOUT_MS, drop backlight
+// to 0; when inactivity resets (user touched) and backlight is off, restore.
+static void screen_idle_tick(lv_timer_t* t) {
+    (void)t;
+    uint32_t inactive = lv_disp_get_inactive_time(NULL);
+    if (inactive >= SCREEN_IDLE_TIMEOUT_MS) {
+        if (g_backlight_on) {
+            M5.Display.setBrightness(0);
+            g_backlight_on = false;
+        }
+    } else {
+        if (!g_backlight_on) {
+            M5.Display.setBrightness(Page::GetCurrentBrightness());
+            g_backlight_on = true;
+        }
+    }
+}
 
 void App_Init() {
     static AppFactory factory;
     static PageManager manager(&factory);
+
+    // FR35: instantiate the app-level recorder model singleton.
+    static Page::AppRecorderModel s_recorder_model;
+    Page::g_app_recorder_model = &s_recorder_model;
 
     /* Make sure the default group exists */
     if (!lv_group_get_default()) {
@@ -64,14 +94,18 @@ void App_Init() {
     manager.Install("AppI2C", "Pages/AppI2C");
     manager.Install("AppRTC", "Pages/AppRTC");
     manager.Install("AppRecorder", "Pages/AppRecorder");
+    manager.Install("AppFiles", "Pages/AppFiles");
+    manager.Install("AppSettings", "Pages/AppSettings");
 
     manager.SetGlobalLoadAnimType(PageManager::LOAD_ANIM_NONE);
 
-    // Boot straight into the meeting recorder. The factory demo (StartUp ->
-    // HomeMenu and the hardware apps) stays installed, reachable via the
-    // recorder's hidden swipe-down gesture; a power-cycle returns here.
+    // Boot landing page = recorder screen (FR24 success criterion).
     manager.Push("Pages/AppRecorder");
+
+    // Screen auto-off ticker (FR19-FR21).
+    lv_timer_create(screen_idle_tick, 200, nullptr);
 }
 
 void App_Uninit() {
+    Page::g_app_recorder_model = nullptr;
 }

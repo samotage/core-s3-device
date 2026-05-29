@@ -33,6 +33,8 @@
 #include "AppI2C/AppI2C.h"
 #include "AppRTC/AppRTC.h"
 #include "AppRecorder/AppRecorder.h"
+#include "AppFiles/AppFiles.h"
+#include "AppSettings/AppSettings.h"
 
 #define APP_CLASS_MATCH(className)           \
     do {                                     \
@@ -44,6 +46,8 @@
 PageBase* AppFactory::CreatePage(const char* name) {
     APP_CLASS_MATCH(StartUp);
     APP_CLASS_MATCH(HomeMenu);
+    // Factory demo pages — still registered so they're compiled-in (FR11),
+    // but the new HomeMenu does not link to them.
     APP_CLASS_MATCH(AppWiFi);
     APP_CLASS_MATCH(AppCamera);
     APP_CLASS_MATCH(AppMic);
@@ -54,6 +58,9 @@ PageBase* AppFactory::CreatePage(const char* name) {
     APP_CLASS_MATCH(AppI2C);
     APP_CLASS_MATCH(AppRTC);
     APP_CLASS_MATCH(AppRecorder);
+    // Standalone-experience pages (PRD §2 In Scope).
+    APP_CLASS_MATCH(AppFiles);
+    APP_CLASS_MATCH(AppSettings);
 
     return nullptr;
 }

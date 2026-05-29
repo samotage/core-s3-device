@@ -23,8 +23,10 @@ class AppRecorder : public PageBase {
     virtual void onViewDidUnload();
 
    private:
+    AppRecorderModel* Model() { return g_app_recorder_model; }
     void Update();
     void ShowIdle();
+    bool StorageFull();
     void AttachEvent(lv_obj_t* obj) { AttachEvent(obj, LV_EVENT_ALL); }
     void AttachEvent(lv_obj_t* obj, lv_event_code_t code);
     static void onTimerUpdate(lv_timer_t* timer);
@@ -32,10 +34,9 @@ class AppRecorder : public PageBase {
 
    private:
     AppRecorderView View;
-    AppRecorderModel Model;
     lv_timer_t* timer;
     uint32_t last_sec;
-    int last_wifi;  // -1 unknown, 0 down, 1 up — only repaint on change
+    bool last_storage_full;
 };
 
 }  // namespace Page
