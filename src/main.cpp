@@ -22,8 +22,12 @@ void setup() {
         ret = nvs_flash_init();
     }
 
-    Serial.begin(15200);
+    Serial.begin(115200);   // was 15200 (typo); USB-CDC ignores it but it matters for non-CDC builds
+    delay(1500);            // let USB-CDC enumerate so the next few prints actually emit
+    Serial.println("[BOOT] setup() entered"); Serial.flush();
+
     M5.begin();
+    Serial.println("[BOOT] M5.begin() ok"); Serial.flush();
 
 #if defined(M5CORES3)
     Serial.printf("M5CoreS3 User Demo, Version: %s\r\n", DEMO_VERSION);
@@ -38,6 +42,7 @@ void setup() {
 
     // AW9523 Control BOOST
     M5.In_I2C.bitOn(AW9523_ADDR, 0x03, 0b10000000, 100000L);  // BOOST_EN
+    Serial.println("[BOOT] BM8563/AW9523 init ok"); Serial.flush();
 
 #if MONKEY_TEST_ENABLE
     M5.Speaker.setAllChannelVolume(0);
@@ -46,11 +51,14 @@ void setup() {
 
     lv_init();
     m5gfx_lvgl_init();
+    Serial.println("[BOOT] LVGL init ok"); Serial.flush();
 
     App_Init();
+    Serial.println("[BOOT] App_Init() done"); Serial.flush();
 
     // WiFi file server so a Headspace agent can pull recordings (no-op offline).
     Net::Server.begin();
+    Serial.println("[BOOT] Net::Server.begin() done"); Serial.flush();
 }
 
 void loop() {

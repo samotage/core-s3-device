@@ -21,16 +21,22 @@ bool AppRecorderModel::IsSDCardPresent() {
 
 bool AppRecorderModel::InitSD() {
     if (sd_ready) return true;
-    sd_ready = SD.begin(GPIO_NUM_4, SPI, 25000000);
+    Serial.println("[REC] mounting SD (will auto-format FAT32/MBR if unmountable)...");
+    Serial.flush();
+    // 6th arg = format_if_empty=true: when the FATFS mount fails, ESP-IDF will
+    // create a fresh FAT32 partition with an MBR table — the canonical SD
+    // layout the Arduino-ESP32 SD library expects. Handles cards the Mac
+    // formats in incompatible ways (FAT32-on-GPT, unusual cluster geometry,
+    // corrupt cluster chains). On a 256 GB card the format itself can take
+    // a while; the UI will block until it completes.
+    sd_ready = SD.begin(GPIO_NUM_4, SPI, 25000000, "/sd", 5, /*format_if_empty=*/true);
     if (sd_ready) {
         file_num = FindNextFileNum();
-        // Log free space too — surfaces orphan-cluster corruption / disk-full
-        // states early (a near-zero free total = stop trusting the card).
         uint64_t free_mb = SDFreeMB();
         Serial.printf("[REC] SD ready, next file: REC_%03d.wav  (free: %llu MB)\n",
                       file_num, free_mb);
     } else {
-        Serial.println("[REC] SD mount failed");
+        Serial.println("[REC] SD mount failed (even after attempted format)");
     }
     return sd_ready;
 }
