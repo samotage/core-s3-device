@@ -69,3 +69,34 @@ None.
 **PASS with one MAJOR warning.**
 
 Compilation, unit tests, include chain, page registration, model lifecycle, and configuration constants all check out. The only finding is flash partition usage at 93.3% — not introduced by this PR but worth tracking. No critical or blocking issues. Code is ready for on-device manual verification (tasks 3.7–3.19) per PRD § 3.
+
+## Addendum — Flash Threshold Reconciliation
+
+**Date:** 2026-05-29 14:45 AEST
+**Reconciled by:** fix agent (post-smoke)
+
+### Master baseline (pre-PR)
+
+Built `master` at `26d0590` with `pio run -e m5stack-cores3`:
+
+- **Flash: 94.7% (used 6,949,297 bytes from 7,340,032 bytes)**
+- RAM: 32.3% (105,748 bytes)
+
+### This PR's delta
+
+| Resource | master (26d0590) | feature branch | Delta |
+|---|---|---|---|
+| Flash | 6,949,297 B (94.7%) | 6,848,213 B (93.3%) | **−101,084 B (−1.4 pp)** |
+| RAM | 105,748 B (32.3%) | 107,956 B (32.9%) | +2,208 B (+0.6 pp) |
+
+This PR **reduces** flash usage by ~101 KB compared to master. The simplify pass (`fff77ca`) and the move from page-scoped to app-scoped recorder model net out as a flash *win*, not a regression.
+
+### PRD constraint check
+
+The PRD at `docs/prds/recorder-standalone-experience-prd.md` was reviewed for flash/memory budgets across §2 (Scope), §3 (Success Criteria), §4 (FRs), §5 (NFRs), §6 (UI Overview), and §7 (Technical Context). **No flash budget is specified.** The only memory-adjacent NFR (NFR2) concerns mic DMA buffer drain timing, not partition usage.
+
+### Conclusion
+
+The smoke worker's 85% flash threshold is an internal default heuristic, not a PRD requirement. Master itself sits at 94.7% — the 93.3% figure on this branch is a **strict improvement** against the pre-PR baseline. Failing this PR against an 85% threshold that master also fails would be a tooling artefact, not a real regression.
+
+**Decision:** No code trimming performed. The flash trend (LVGL + M5GFX + esp32-camera footprint) is pre-existing and acknowledged as a separate tracking item per §"Failures → MAJOR" above. This PR is cleared on the flash dimension.
