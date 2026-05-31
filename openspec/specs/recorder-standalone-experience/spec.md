@@ -178,6 +178,19 @@ Rationale: this is a portable field recorder. Requiring a multi-second hold to p
 
 ---
 
+### Requirement: Boot Splash
+The device SHALL display a branded "Starting…" splash frame as soon as the display backlight is enabled at boot, before the LVGL, SD-mount, and WiFi-join initialisation completes. A healthy boot takes several seconds; without an early frame the lit-but-blank panel is indistinguishable from a dead device. The splash SHALL be drawn directly (not via LVGL, which is not yet initialised at that point) and SHALL use the brand palette. The recorder screen replaces it once the application UI is up.
+
+#### Scenario: Splash appears immediately on boot
+- **WHEN** the device powers on and the display backlight is enabled
+- **THEN** a branded "Starting…" frame is shown within the first display frame, before SD mount and WiFi join complete
+
+#### Scenario: Splash is replaced by the recorder UI
+- **WHEN** application initialisation finishes and the LVGL recorder screen renders
+- **THEN** the splash is replaced by the normal recorder screen
+
+---
+
 ### Requirement: Critical Battery Auto-Save and Graceful Shutdown
 The device SHALL monitor battery voltage during recording via the AXP2101. When the battery reaches a critical threshold (approximately 8–10%, corresponding to ~3.3 V on the LiPo discharge curve, exact threshold tuned on hardware), the device SHALL auto-save the current recording — finalise the WAV header, flush buffered data, close the file — and then perform a graceful AXP2101 shutdown.
 

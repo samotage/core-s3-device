@@ -53,6 +53,23 @@ void setup() {
     // — defaults to DEFAULT_BRIGHTNESS until the user touches the slider.
     M5.Display.setBrightness(Page::GetCurrentBrightness());
 
+    // FR-SPLASH: draw a branded "Starting..." frame immediately, directly via
+    // M5GFX, before the multi-second LVGL/SD-mount/WiFi-join init below. A
+    // healthy boot takes several seconds; without this the lit-but-blank panel
+    // looks dead (the "should I bin it?" scare). LVGL overwrites this with the
+    // recorder screen once the app loop starts. Brand palette: BG 0x1A1A1A,
+    // copper 0xC78C5C, grey 0xA8A39D.
+    M5.Display.fillScreen(M5.Display.color888(0x1A, 0x1A, 0x1A));
+    M5.Display.setTextSize(3);
+    M5.Display.setTextColor(M5.Display.color888(0xC7, 0x8C, 0x5C));
+    M5.Display.drawCenterString("otageLabs", M5.Display.width() / 2,
+                                M5.Display.height() / 2 - 30);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(M5.Display.color888(0xA8, 0xA3, 0x9D));
+    M5.Display.drawCenterString("Starting...", M5.Display.width() / 2,
+                                M5.Display.height() / 2 + 12);
+    Serial.println("[BOOT] splash drawn"); Serial.flush();
+
     // Make sure the AXP2101 ADC is sampling so the status bar gets real
     // battery readings from boot (otherwise vbat stays at last-cached 0).
     {
