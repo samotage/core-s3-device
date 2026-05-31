@@ -4,10 +4,21 @@
 SemaphoreHandle_t xGuiSemaphore;
 static lv_disp_draw_buf_t draw_buf;
 
+// See header: set true while recording so the LCD never touches the shared SPI
+// bus (it reuses MISO as D/C and corrupts concurrent SD writes on the CoreS3).
+volatile bool g_lcd_flush_suppress = false;
+
 LV_IMG_DECLARE(cursor_hand);
 
 static void m5gfx_lvgl_flush(lv_disp_drv_t *disp, const lv_area_t *area,
                              lv_color_t *color_p) {
+    // Recording in progress: hand the SPI bus entirely to the SD card. Ack the
+    // frame without driving the LCD (screen freezes / sleeps during capture).
+    if (g_lcd_flush_suppress) {
+        lv_disp_flush_ready(disp);
+        return;
+    }
+
     int w = (area->x2 - area->x1 + 1);
     int h = (area->y2 - area->y1 + 1);
 

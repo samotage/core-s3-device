@@ -1,7 +1,28 @@
 #include "AppRecorderModel.h"
 #include "M5Unified.h"
+#include <esp_heap_caps.h>
+#include <esp_system.h>
 
 using namespace Page;
+
+// LCD flush suppression (see m5gfx_lvgl.h): while recording, the LCD must not
+// touch the shared SPI bus — it reuses MISO as D/C and corrupts SD writes.
+extern volatile bool g_lcd_flush_suppress;
+
+// [INSTR] Temporary diagnostic for the ~6.5-min capture cut-off + rollover hang.
+// Prints internal-heap + DMA-capable-heap free/largest-block (I2S needs DMA-capable
+// internal RAM) so we can see fragmentation/exhaustion build toward the failure.
+// Remove once root cause is found.
+static void InstrHeap(const char* tag, uint32_t chunks) {
+    Serial.printf("[INSTR] %-14s chunks=%u t=%lus  int=%u(lrg=%u)  dma=%u(lrg=%u)  minEver=%u\n",
+                  tag, (unsigned)chunks, (unsigned long)(millis() / 1000),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+                  (unsigned)esp_get_minimum_free_heap_size());
+    Serial.flush();
+}
 
 // App-level recording-model singleton. Defined here, declared extern in the
 // header. App_Init() assigns; pages reference via the pointer.
@@ -97,6 +118,7 @@ bool AppRecorderModel::StartRecording() {
     rec_start_ms  = millis();
     last_flush_ms = rec_start_ms;
     recording     = true;
+    g_lcd_flush_suppress = true;   // SD owns the SPI bus while recording
     Serial.printf("[REC] Recording -> %s\n", last_filename);
     return true;
 }
@@ -106,8 +128,9 @@ void AppRecorderModel::StopRecording() {
     recording = false;
     level     = 0;
 
-    WriteHeader();
+    WriteHeader();              // final SD writes still need the bus to itself
     wav_file.close();
+    g_lcd_flush_suppress = false;  // recording done — LCD may use the bus again
     Serial.printf("[REC] Saved %s (%u bytes, %us)\n", last_filename, total_bytes,
                   total_bytes / (REC_SAMPLE_RATE * 2));
     file_num++;
@@ -115,7 +138,23 @@ void AppRecorderModel::StopRecording() {
 
 bool AppRecorderModel::WriteChunk() {
     if (!recording) return false;
+
+    // [INSTR] 15s heap/timeline heartbeat — fires whether or not the mic is
+    // healthy, so we get a clean slope right up to and past the ~6.5-min mark.
+    {
+        static uint32_t instr_last = 0;
+        uint32_t now_i = millis();
+        if (now_i - instr_last >= 15000) {
+            instr_last = now_i;
+            InstrHeap("hb", total_bytes / (REC_CHUNK_SIZE * sizeof(int16_t)));
+        }
+    }
+
     if (!M5.Mic.record(rec_chunk, REC_CHUNK_SIZE, REC_SAMPLE_RATE)) {
+        // [INSTR] capture exact state the instant the mic first stops delivering.
+        if (mic_fail_streak == 0) {
+            InstrHeap("MIC-FIRST-FAIL", total_bytes / (REC_CHUNK_SIZE * sizeof(int16_t)));
+        }
         // Silent mic failure — the cause of the ~6-min cut-off. Track the streak;
         // if it persists, auto-rollover (finalise this file, reset codec, start
         // the next file) so the meeting keeps recording without user action.
@@ -141,19 +180,36 @@ bool AppRecorderModel::WriteChunk() {
     // Successful read clears the streak.
     mic_fail_streak = 0;
 
-    // SD safety: check the SD write actually persisted the bytes. The crash-
-    // corrupted-FAT scenario (50-min YouTube recording lost) returned
-    // "success" from SD.open + claimed bytes written, but the file was 0 on
-    // disk. If write() ever returns short, stop the recording immediately so
-    // we don't capture into the void.
+    // SD safety + RETRY: a short write means the SD write didn't fully persist.
+    // Bisection (T/U/V/W tests) proved the card, SPI bus, header-seek, and
+    // mic+SD are each rock-solid in isolation — short writes ONLY appear with
+    // mic + LCD + SD all active, i.e. a transient three-way resource collision
+    // that nicks one write. Treating that as fatal (the old behaviour) threw away
+    // the rest of the meeting. Instead, rewind to the chunk start and retry: a
+    // transient glitch succeeds within a couple of attempts. Only a SUSTAINED
+    // failure (card genuinely gone) falls through to rollover.
     const size_t want = REC_CHUNK_SIZE * sizeof(int16_t);
-    const size_t got  = wav_file.write((uint8_t*)rec_chunk, want);
+    size_t got = wav_file.write((uint8_t*)rec_chunk, want);
     if (got != want) {
-        Serial.printf("[REC] SD WRITE SHORT — expected %u got %u — STOPPING "
-                      "(filesystem fault, total so far %u bytes)\n",
-                      (unsigned)want, (unsigned)got, total_bytes);
-        recording = false;  // truthful timer freezes; controller next tick sees idle
-        return false;
+        const uint32_t MAX_RETRIES = 12;
+        uint32_t retries = 0;
+        while (got != want && retries < MAX_RETRIES) {
+            ++retries;
+            wav_file.seek(sizeof(RecWavHeader) + total_bytes);  // rewind to chunk start
+            delay(2);                                            // let the bus/card settle
+            got = wav_file.write((uint8_t*)rec_chunk, want);
+        }
+        if (got != want) {
+            Serial.printf("[REC] SD WRITE SHORT after %u retries (got %u/%u, total %u) "
+                          "— rolling to a fresh file\n",
+                          retries, (unsigned)got, (unsigned)want, total_bytes);
+            Serial.flush();
+            RolloverFile();   // keep the meeting alive in a new file, don't hard-stop
+            return false;
+        }
+        Serial.printf("[REC] SD write recovered after %u retr%s (at %u bytes)\n",
+                      retries, retries == 1 ? "y" : "ies", total_bytes);
+        Serial.flush();
     }
     total_bytes += got;
 
@@ -193,13 +249,17 @@ bool AppRecorderModel::RolloverFile() {
     Serial.printf("[REC] AUTO-ROLLOVER triggered  streak=%u  bytes=%u\n",
                   mic_fail_streak, total_bytes);
 
+    Serial.println("[INSTR] rollover> StopRecording()...");        Serial.flush();
     StopRecording();           // finalises the WAV, increments file_num
-
+    Serial.println("[INSTR] rollover> StopRecording() done; Mic.end()..."); Serial.flush();
     M5.Mic.end();
+    Serial.println("[INSTR] rollover> Mic.end() done; delay+Mic.begin()...");  Serial.flush();
     delay(50);                 // brief settle so the I2S driver tears down clean
     M5.Mic.begin();
+    Serial.println("[INSTR] rollover> Mic.begin() done; StartRecording()..."); Serial.flush();
 
     bool ok = StartRecording();
+    Serial.printf("[INSTR] rollover> StartRecording() -> %d\n", ok); Serial.flush();
     if (ok) {
         mic_fail_streak     = 0;
         last_rollover_ms    = millis();

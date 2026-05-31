@@ -86,16 +86,16 @@ void AppRecorderView::Create(lv_obj_t* root) {
     }
     lv_obj_add_flag(ui.btn_to_files, LV_OBJ_FLAG_HIDDEN);
 
-    // Menu (back) button (FR12) — bottom-left, doesn't crowd the hero.
+    // Back-disclosure button (FR12) — bottom-left, chevron only, doesn't crowd the hero.
     ui.btn_menu = lv_btn_create(root);
-    lv_obj_set_size(ui.btn_menu, 70, 28);
+    lv_obj_set_size(ui.btn_menu, 40, 28);
     lv_obj_align(ui.btn_menu, LV_ALIGN_BOTTOM_LEFT, 6, -6);
     lv_obj_set_style_radius(ui.btn_menu, 6, 0);
     lv_obj_set_style_bg_color(ui.btn_menu, COL_SURFACE, 0);
     lv_obj_set_style_border_width(ui.btn_menu, 0, 0);
     {
         lv_obj_t* l = lv_label_create(ui.btn_menu);
-        lv_label_set_text(l, LV_SYMBOL_LEFT " Menu");
+        lv_label_set_text(l, LV_SYMBOL_LEFT);
         lv_obj_set_style_text_color(l, COL_OFFWHITE, 0);
         lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
         lv_obj_center(l);

@@ -2,8 +2,211 @@
 #include "../AppPower/AppPowerModel.h"
 #include "../../net/RecorderServer.h"
 #include <SD.h>
+#include <SPI.h>
 
 using namespace Page;
+
+// [SDTEST] Diagnostic-only SD write stress test, triggered by serial 'T'.
+// Hammers the card with the recorder's exact 2048-byte chunked-write pattern
+// (incl. the 5s flush cadence) across descending SPI clocks, isolating the SD
+// path from the mic/LVGL pipeline. Reports throughput + the exact byte offset
+// of any short write. Remove once the SD cut-off root cause is nailed.
+static void RunSDTest() {
+    static uint8_t buf[2048];
+    for (size_t i = 0; i < sizeof(buf); ++i) buf[i] = (uint8_t)(i & 0xFF);
+    const uint32_t speeds[] = {25000000, 20000000, 16000000, 10000000, 4000000};
+    const uint32_t TARGET = 20UL * 1024 * 1024;  // 20 MB/speed (~10.5 min audio-equiv)
+
+    Serial.println("\n[SDTEST] ===== SD WRITE STRESS TEST START =====");
+    Serial.flush();
+    for (uint32_t sp : speeds) {
+        Serial.printf("[SDTEST] ---- SPI %lu Hz ----\n", (unsigned long)sp); Serial.flush();
+        SD.end();
+        delay(150);
+        if (!SD.begin(GPIO_NUM_4, SPI, sp)) {
+            Serial.printf("[SDTEST] %lu: SD.begin() FAILED to mount\n", (unsigned long)sp);
+            Serial.flush();
+            continue;
+        }
+        Serial.printf("[SDTEST] %lu: mounted total=%lluMB used=%lluMB\n", (unsigned long)sp,
+                      (unsigned long long)(SD.totalBytes() / 1048576ULL),
+                      (unsigned long long)(SD.usedBytes() / 1048576ULL));
+        Serial.flush();
+        SD.remove("/SDTEST.bin");
+        File f = SD.open("/SDTEST.bin", FILE_WRITE);
+        if (!f) { Serial.printf("[SDTEST] %lu: open FAILED\n", (unsigned long)sp); Serial.flush(); continue; }
+
+        uint32_t total = 0, chunks = 0; bool failed = false;
+        uint32_t t0 = millis(), last = t0;
+        while (total < TARGET) {
+            size_t got = f.write(buf, sizeof(buf));
+            ++chunks;
+            if (got != sizeof(buf)) {
+                Serial.printf("[SDTEST] %lu: *** SHORT WRITE *** chunk=%lu got=%u at %lu bytes (%lu KB)\n",
+                              (unsigned long)sp, (unsigned long)chunks, (unsigned)got,
+                              (unsigned long)total, (unsigned long)(total / 1024));
+                Serial.flush(); failed = true; break;
+            }
+            total += got;
+            if (millis() - last >= 5000) {            // mirror the recorder's 5s header flush
+                last = millis();
+                f.flush();
+                uint32_t dt = millis() - t0;
+                Serial.printf("[SDTEST] %lu: %lu MB ok, ~%lu KB/s\n", (unsigned long)sp,
+                              (unsigned long)(total / 1048576UL),
+                              dt ? (unsigned long)((uint64_t)total / dt) : 0);
+                Serial.flush();
+            }
+        }
+        f.flush(); f.close();
+        uint32_t dt = millis() - t0;
+        Serial.printf("[SDTEST] %lu: RESULT %s wrote %lu KB in %lus (~%lu KB/s)\n",
+                      (unsigned long)sp, failed ? "FAIL" : "PASS",
+                      (unsigned long)(total / 1024), (unsigned long)(dt / 1000),
+                      dt ? (unsigned long)((uint64_t)total / dt) : 0);
+        Serial.flush();
+        SD.remove("/SDTEST.bin");
+    }
+    Serial.println("[SDTEST] ===== DONE (reset device to resume recorder) ====="); Serial.flush();
+}
+
+// [SDTEST2] Same write load at 25 MHz, but replicating the recorder's WAV-header
+// rewrite: every 5s seek to byte 0, rewrite the 44-byte header, seek back to the
+// end. This is the one thing the plain stress test omits. If THIS short-writes,
+// the seek-to-front-of-growing-file pattern is the cut-off cause. Triggered by 'U'.
+static void RunSDTestSeek() {
+    static uint8_t buf[2048];
+    for (size_t i = 0; i < sizeof(buf); ++i) buf[i] = (uint8_t)(i & 0xFF);
+    uint8_t hdr[44] = {0};
+    const uint32_t TARGET = 20UL * 1024 * 1024;
+    Serial.println("\n[SDTEST2] ===== SD WRITE + WAV-HEADER-SEEK (25MHz) ====="); Serial.flush();
+    SD.end(); delay(150);
+    if (!SD.begin(GPIO_NUM_4, SPI, 25000000)) { Serial.println("[SDTEST2] mount FAILED"); Serial.flush(); return; }
+    SD.remove("/SDTEST2.wav");
+    File f = SD.open("/SDTEST2.wav", FILE_WRITE);
+    if (!f) { Serial.println("[SDTEST2] open FAILED"); Serial.flush(); return; }
+    f.write(hdr, 44);  // placeholder header, like StartRecording()
+    uint32_t total = 0, chunks = 0, seeks = 0; bool failed = false;
+    uint32_t t0 = millis(), last = t0;
+    while (total < TARGET) {
+        size_t got = f.write(buf, sizeof(buf));
+        ++chunks;
+        if (got != sizeof(buf)) {
+            Serial.printf("[SDTEST2] *** SHORT WRITE *** chunk=%lu got=%u at %lu KB (after %lu header-seeks)\n",
+                          (unsigned long)chunks, (unsigned)got, (unsigned long)(total / 1024), (unsigned long)seeks);
+            Serial.flush(); failed = true; break;
+        }
+        total += got;
+        if (millis() - last >= 5000) {            // exact WriteHeader() pattern
+            last = millis();
+            f.seek(0);
+            size_t hw = f.write(hdr, 44);
+            f.seek(44 + total);
+            f.flush();
+            ++seeks;
+            if (hw != 44) {
+                Serial.printf("[SDTEST2] *** HEADER SHORT WRITE *** got=%u at %lu KB\n",
+                              (unsigned)hw, (unsigned long)(total / 1024));
+                Serial.flush(); failed = true; break;
+            }
+            uint32_t dt = millis() - t0;
+            Serial.printf("[SDTEST2] %lu KB ok (%lu seeks) ~%lu KB/s\n", (unsigned long)(total / 1024),
+                          (unsigned long)seeks, dt ? (unsigned long)((uint64_t)total / dt) : 0);
+            Serial.flush();
+        }
+    }
+    f.flush(); f.close();
+    Serial.printf("[SDTEST2] RESULT %s wrote %lu KB, %lu header-seeks\n",
+                  failed ? "FAIL" : "PASS", (unsigned long)(total / 1024), (unsigned long)seeks);
+    Serial.flush();
+    SD.remove("/SDTEST2.wav");
+    Serial.println("[SDTEST2] ===== DONE ====="); Serial.flush();
+}
+
+// [SDTEST4] SD writes + an LCD draw every chunk (no mic). Tests whether LCD bus
+// traffic (different driver stack, shared SPI) corrupts interleaved SD writes.
+// Triggered by 'V'.
+static void RunSDTestDisp() {
+    static uint8_t buf[2048];
+    for (size_t i = 0; i < sizeof(buf); ++i) buf[i] = (uint8_t)(i & 0xFF);
+    uint8_t hdr[44] = {0};
+    const uint32_t TARGET = 20UL * 1024 * 1024;
+    Serial.println("\n[SDTEST4] ===== SD + LCD-DRAW every chunk (no mic) 25MHz ====="); Serial.flush();
+    SD.end(); delay(150);
+    if (!SD.begin(GPIO_NUM_4, SPI, 25000000)) { Serial.println("[SDTEST4] mount FAILED"); Serial.flush(); return; }
+    SD.remove("/SDTEST4.wav");
+    File f = SD.open("/SDTEST4.wav", FILE_WRITE);
+    if (!f) { Serial.println("[SDTEST4] open FAILED"); Serial.flush(); return; }
+    f.write(hdr, 44);
+    uint32_t total = 0, chunks = 0; bool failed = false; uint32_t t0 = millis(), last = t0; uint16_t col = 0;
+    while (total < TARGET) {
+        col += 0x0841;                                  // a VU/timer-style LCD redraw over the shared bus
+        M5.Display.fillRect(8, 210, 60, 10, col);
+        size_t got = f.write(buf, sizeof(buf));
+        ++chunks;
+        if (got != sizeof(buf)) {
+            Serial.printf("[SDTEST4] *** SD SHORT WRITE *** chunk=%lu got=%u at %lu KB\n",
+                          (unsigned long)chunks, (unsigned)got, (unsigned long)(total / 1024));
+            Serial.flush(); failed = true; break;
+        }
+        total += got;
+        if (millis() - last >= 5000) {
+            last = millis(); f.seek(0); f.write(hdr, 44); f.seek(44 + total); f.flush();
+            uint32_t dt = millis() - t0;
+            Serial.printf("[SDTEST4] %lu KB ok ~%lu KB/s\n", (unsigned long)(total / 1024),
+                          dt ? (unsigned long)((uint64_t)total / dt) : 0);
+            Serial.flush();
+        }
+    }
+    f.flush(); f.close();
+    Serial.printf("[SDTEST4] RESULT %s wrote %lu KB\n", failed ? "FAIL" : "PASS", (unsigned long)(total / 1024));
+    Serial.flush();
+    SD.remove("/SDTEST4.wav");
+    Serial.println("[SDTEST4] ===== DONE ====="); Serial.flush();
+}
+
+// [SDTEST3] The real recording loop minus the display: live M5.Mic.record() +
+// SD write + 5s header seek, paced by the mic (~real-time). Triggered by 'W'.
+// TARGET 16 MB (~8.3 min) — long, but the cut-off historically hits by ~6.5 min.
+static void RunSDTestMic() {
+    static int16_t mic[1024];
+    uint8_t hdr[44] = {0};
+    const uint32_t TARGET = 16UL * 1024 * 1024;
+    Serial.println("\n[SDTEST3] ===== SD + LIVE MIC (no display) 25MHz ====="); Serial.flush();
+    M5.Speaker.end(); M5.Mic.begin();
+    SD.end(); delay(150);
+    if (!SD.begin(GPIO_NUM_4, SPI, 25000000)) { Serial.println("[SDTEST3] mount FAILED"); Serial.flush(); M5.Mic.end(); M5.Speaker.begin(); return; }
+    SD.remove("/SDTEST3.wav");
+    File f = SD.open("/SDTEST3.wav", FILE_WRITE);
+    if (!f) { Serial.println("[SDTEST3] open FAILED"); Serial.flush(); M5.Mic.end(); M5.Speaker.begin(); return; }
+    f.write(hdr, 44);
+    uint32_t total = 0, chunks = 0, micfail = 0; bool failed = false; uint32_t t0 = millis(), last = t0;
+    while (total < TARGET) {
+        if (!M5.Mic.record(mic, 1024, 16000)) ++micfail;   // paces the loop to real-time
+        size_t got = f.write((uint8_t*)mic, 2048);
+        ++chunks;
+        if (got != 2048) {
+            Serial.printf("[SDTEST3] *** SD SHORT WRITE *** chunk=%lu got=%u at %lu KB (micfails=%lu)\n",
+                          (unsigned long)chunks, (unsigned)got, (unsigned long)(total / 1024), (unsigned long)micfail);
+            Serial.flush(); failed = true; break;
+        }
+        total += got;
+        if (millis() - last >= 5000) {
+            last = millis(); f.seek(0); f.write(hdr, 44); f.seek(44 + total); f.flush();
+            uint32_t dt = millis() - t0;
+            Serial.printf("[SDTEST3] %lu KB ok, micfails=%lu, ~%lu KB/s\n", (unsigned long)(total / 1024),
+                          (unsigned long)micfail, dt ? (unsigned long)((uint64_t)total / dt) : 0);
+            Serial.flush();
+        }
+    }
+    f.flush(); f.close();
+    Serial.printf("[SDTEST3] RESULT %s wrote %lu KB micfails=%lu\n", failed ? "FAIL" : "PASS",
+                  (unsigned long)(total / 1024), (unsigned long)micfail);
+    Serial.flush();
+    SD.remove("/SDTEST3.wav");
+    M5.Mic.end(); M5.Speaker.begin();
+    Serial.println("[SDTEST3] ===== DONE ====="); Serial.flush();
+}
 
 AppRecorder::AppRecorder()
     : timer(nullptr), last_sec(0), last_storage_full(false) {}
@@ -109,6 +312,14 @@ void AppRecorder::Update() {
             Net::Server.setRecording(false);
             Net::Server.requestNotify();
             View.SetSaved(Model()->LastFilename(), last_sec);
+        } else if (c == 'T' && !Model()->IsRecording()) {
+            RunSDTest();      // [SDTEST]  plain append-write stress, all SPI speeds
+        } else if (c == 'U' && !Model()->IsRecording()) {
+            RunSDTestSeek();  // [SDTEST2] adds the WAV-header seek-rewrite pattern
+        } else if (c == 'V' && !Model()->IsRecording()) {
+            RunSDTestDisp();  // [SDTEST4] SD + LCD draw (isolate display/bus)
+        } else if (c == 'W' && !Model()->IsRecording()) {
+            RunSDTestMic();   // [SDTEST3] SD + live mic (real loop minus display)
         }
     }
 
