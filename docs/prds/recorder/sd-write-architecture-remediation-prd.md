@@ -96,9 +96,9 @@ Each decision records the call, the rationale, and the rejected alternative.
   Rationale: a 30 s ring overrun means the card has stalled >30 s straight — the card is dead, not stalling. Everything captured so far is preserved and the file is playable. (Confirmed by Sam, 2026-05-31.)
   Rejected: drop-oldest — unacceptable for a meeting recorder; silently corrupts the record.
 
-- **D4 — SD recovery on short-write: single best-effort `SD.end()/begin()` retry; if the retry still short-writes, stop + finalise + surface "SD fault — restart device."**
-  Rationale: today's wedge needed a full power cycle (EN-reset didn't clear it), so software re-init will likely fail — but a single cheap attempt costs nothing and covers a transient case. No elaborate recovery subsystem, no resume-to-new-segment (deferred).
-  Rejected: multi-attempt recovery loop / segment-resume — dead code if the wedge isn't software-clearable; revisit only if a recoverable wedge is observed.
+- **D4 — SD recovery on short-write: stop-only — stop + finalise + surface "SD fault — restart device." No software re-init.**
+  Rationale: the §11 open item asked whether a single `SD.end()/begin()` clears the observed wedge. **Resolved during implementation (Chip, 2026-05-31): it does not — the bench-confirmed wedge needs a full hardware power cycle, so a re-init attempt would be dead code.** Dropped it. The original plan was a single best-effort re-init then stop; the re-init was removed once confirmed ineffective.
+  Rejected: single re-init attempt (dead code on this wedge), multi-attempt recovery loop, resume-to-new-segment (deferred) — none can clear a wedge that requires a power cycle.
 
 - **D5 — Ticker mandatory ≥1 Hz; VU meter deferred.**
   Rationale: Sam ranked the elapsed-time ticker as the must-have "still-recording" proof; the VU meter is low priority. With SD off the UI thread the ticker is free. Keeping LCD bus-grabs minimal (ticker only) reduces mutex contention with the writer.
@@ -160,7 +160,7 @@ Each decision records the call, the rationale, and the rejected alternative.
 ### Overrun & Recovery
 
 - **FR14:** If the ring buffer fills (the writer cannot keep up because the card has stalled longer than the buffer depth), recording stops cleanly: the writer finalises the WAV to the last successfully written byte, the file is closed, and a visible error is shown. No audio already captured is lost or corrupted.
-- **FR15:** On a short write (write returns fewer bytes than requested), the writer makes a single best-effort `SD.end()/begin()` re-init attempt and retries the write once. If the write still short-writes, recording stops per FR14 and the user is shown "SD fault — restart device."
+- **FR15:** On a short write (write returns fewer bytes than requested), recording stops immediately per FR14 and the user is shown "SD fault — restart device." No software `SD.end()/begin()` re-init is attempted — the observed wedge requires a hardware power cycle, so re-init would be dead code (resolved during implementation, see D4).
 - **FR16:** All stop-with-error paths (FR14, FR15) surface a visible on-screen error state so the user knows recording has stopped — never a silent stop.
 
 ### Auto-Format Removal
@@ -267,6 +267,6 @@ Guidance, not requirements — grounded in the current codebase.
 
 ## 11. Open Items for Implementation Detail (Chip)
 
-- Confirm whether a single `SD.end()/begin()` actually clears the observed wedge; if it cannot, drop FR15's re-init to stop-only (the re-init becomes dead code).
+- ~~Confirm whether a single `SD.end()/begin()` actually clears the observed wedge; if it cannot, drop FR15's re-init to stop-only.~~ **Resolved (Chip, 2026-05-31):** it does not clear the wedge (needs a hardware power cycle) — FR15/D4 dropped to stop-only.
 - Confirm the ring primitive — leaning FreeRTOS `StreamBuffer` (single-producer/single-consumer, lock-free, blocking drain) — and the capture-side push mechanism (LVGL timer vs. dedicated capture task) such that capture never blocks on the bus mutex.
 - Confirm the exact `MALLOC_CAP_SPIRAM` free figure on the next boot to validate the 1 MB allocation headroom.
