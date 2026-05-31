@@ -4,17 +4,23 @@
 SemaphoreHandle_t xGuiSemaphore;
 static lv_disp_draw_buf_t draw_buf;
 
-// See header: set true while recording so the LCD never touches the shared SPI
-// bus (it reuses MISO as D/C and corrupts concurrent SD writes on the CoreS3).
-volatile bool g_lcd_flush_suppress = false;
+// Shared SPI-bus mutex (PRD FR8) — created in m5gfx_lvgl_init(), held by the
+// LCD flush (here) and the SD-writer task during their bus access.
+SemaphoreHandle_t g_spi_bus_mutex = nullptr;
+
+// LCD flush bus-grab timeout (FR9). Short enough to never stall the UI/capture
+// thread behind an SD stall; a missed frame is repainted on the next refresh.
+#define LCD_BUS_TIMEOUT_MS 8
 
 LV_IMG_DECLARE(cursor_hand);
 
 static void m5gfx_lvgl_flush(lv_disp_drv_t *disp, const lv_area_t *area,
                              lv_color_t *color_p) {
-    // Recording in progress: hand the SPI bus entirely to the SD card. Ack the
-    // frame without driving the LCD (screen freezes / sleeps during capture).
-    if (g_lcd_flush_suppress) {
+    // FR9: try-take the shared bus; if the SD writer holds it (e.g. mid card-stall),
+    // skip this frame rather than block — the UI thread (and capture) must never
+    // wait behind an SD operation.
+    if (g_spi_bus_mutex &&
+        xSemaphoreTake(g_spi_bus_mutex, pdMS_TO_TICKS(LCD_BUS_TIMEOUT_MS)) != pdTRUE) {
         lv_disp_flush_ready(disp);
         return;
     }
@@ -26,6 +32,8 @@ static void m5gfx_lvgl_flush(lv_disp_drv_t *disp, const lv_area_t *area,
     M5.Display.setAddrWindow(area->x1, area->y1, w, h);
     M5.Display.writePixels((lgfx::swap565_t *)&color_p->full, w * h);
     M5.Display.endWrite();
+
+    if (g_spi_bus_mutex) xSemaphoreGive(g_spi_bus_mutex);
     lv_disp_flush_ready(disp);
 }
 
@@ -89,6 +97,7 @@ void m5gfx_lvgl_init(void) {
     // lv_indev_set_cursor(indev, cursor);
 
     xGuiSemaphore                                     = xSemaphoreCreateMutex();
+    g_spi_bus_mutex                                   = xSemaphoreCreateMutex();
     const esp_timer_create_args_t periodic_timer_args = {
         .callback = &lvgl_tick_task, .name = "periodic_gui"};
     esp_timer_handle_t periodic_timer;

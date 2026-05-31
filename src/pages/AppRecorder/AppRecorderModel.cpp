@@ -1,31 +1,21 @@
 #include "AppRecorderModel.h"
 #include "M5Unified.h"
+#include <Arduino.h>
 #include <esp_heap_caps.h>
-#include <esp_system.h>
+#include "freertos/semphr.h"
 
 using namespace Page;
 
-// LCD flush suppression (see m5gfx_lvgl.h): while recording, the LCD must not
-// touch the shared SPI bus — it reuses MISO as D/C and corrupts SD writes.
-extern volatile bool g_lcd_flush_suppress;
+// Shared SPI-bus mutex (created in m5gfx_lvgl_init). The CoreS3 LCD and SD card
+// share the SPI bus AND the LCD reuses MISO (GPIO35) as its D/C line, so every
+// SD op (writer task, core 0) and every LCD flush (core 1) must be serialised
+// through this one mutex (PRD FR8-FR10).
+extern SemaphoreHandle_t g_spi_bus_mutex;
 
-// [INSTR] Temporary diagnostic for the ~6.5-min capture cut-off + rollover hang.
-// Prints internal-heap + DMA-capable-heap free/largest-block (I2S needs DMA-capable
-// internal RAM) so we can see fragmentation/exhaustion build toward the failure.
-// Remove once root cause is found.
-static void InstrHeap(const char* tag, uint32_t chunks) {
-    Serial.printf("[INSTR] %-14s chunks=%u t=%lus  int=%u(lrg=%u)  dma=%u(lrg=%u)  minEver=%u\n",
-                  tag, (unsigned)chunks, (unsigned long)(millis() / 1000),
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
-                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
-                  (unsigned)esp_get_minimum_free_heap_size());
-    Serial.flush();
-}
+static inline void bus_take() { if (g_spi_bus_mutex) xSemaphoreTake(g_spi_bus_mutex, portMAX_DELAY); }
+static inline void bus_give() { if (g_spi_bus_mutex) xSemaphoreGive(g_spi_bus_mutex); }
 
-// App-level recording-model singleton. Defined here, declared extern in the
-// header. App_Init() assigns; pages reference via the pointer.
+// App-level recording-model singleton.
 namespace Page {
 AppRecorderModel* g_app_recorder_model = nullptr;
 }
@@ -48,22 +38,19 @@ bool AppRecorderModel::IsSDCardPresent() {
 
 bool AppRecorderModel::InitSD() {
     if (sd_ready) return true;
-    Serial.println("[REC] mounting SD (will auto-format FAT32/MBR if unmountable)...");
+    Serial.println("[REC] mounting SD...");
     Serial.flush();
-    // 6th arg = format_if_empty=true: when the FATFS mount fails, ESP-IDF will
-    // create a fresh FAT32 partition with an MBR table — the canonical SD
-    // layout the Arduino-ESP32 SD library expects. Handles cards the Mac
-    // formats in incompatible ways (FAT32-on-GPT, unusual cluster geometry,
-    // corrupt cluster chains). On a 256 GB card the format itself can take
-    // a while; the UI will block until it completes.
-    sd_ready = SD.begin(GPIO_NUM_4, SPI, 25000000, "/sd", 5, /*format_if_empty=*/true);
+    // FR17 / K5: format_if_empty=FALSE. NEVER auto-format — on 2026-05-31 the
+    // auto-format reformatted and wiped the user's recordings during recovery.
+    // On mount failure we surface an error and refuse to record (FR18), leaving
+    // the card untouched so its data is recoverable on a computer.
+    sd_ready = SD.begin(GPIO_NUM_4, SPI, 25000000, "/sd", 5, /*format_if_empty=*/false);
     if (sd_ready) {
         file_num = FindNextFileNum();
-        uint64_t free_mb = SDFreeMB();
         Serial.printf("[REC] SD ready, next file: REC_%03d.wav  (free: %llu MB)\n",
-                      file_num, free_mb);
+                      file_num, (unsigned long long)SDFreeMB());
     } else {
-        Serial.println("[REC] SD mount failed (even after attempted format)");
+        Serial.println("[REC] SD mount FAILED — refusing to record (card NOT formatted)");
     }
     return sd_ready;
 }
@@ -86,193 +73,220 @@ int AppRecorderModel::FindNextFileNum() {
     }
 }
 
-// Write the WAV header with current sizes, then return the file pointer to the
-// append point. Called on stop and periodically during recording so a yanked
-// cable still leaves a playable file (losing at most REC_FLUSH_MS of audio).
-void AppRecorderModel::WriteHeader() {
-    RecWavHeader header;
-    header.data_size = total_bytes;
-    header.file_size = total_bytes + sizeof(RecWavHeader) - 8;
-    wav_file.seek(0);
-    wav_file.write((uint8_t*)&header, sizeof(header));
-    wav_file.seek(sizeof(RecWavHeader) + total_bytes);
+void AppRecorderModel::SetFault(const char* msg) {
+    snprintf(fault_msg, sizeof(fault_msg), "%s", msg);
+    fault = true;
 }
 
-bool AppRecorderModel::StartRecording() {
-    if (recording) return false;
-    if (!InitSD()) return false;
+// --- WAV header (writer task only) ------------------------------------------
+void AppRecorderModel::WriteHeader() {
+    RecWavHeader header;
+    header.data_size = bytes_written;
+    header.file_size = bytes_written + sizeof(RecWavHeader) - 8;
+    wav_file.seek(0);
+    wav_file.write((uint8_t*)&header, sizeof(header));
+    wav_file.seek(sizeof(RecWavHeader) + bytes_written);
+}
 
-    snprintf(last_filename, sizeof(last_filename), "/REC_%03d.wav", file_num);
+// Open the next REC_NNN.wav and write the zeroed placeholder header. Writer-side,
+// under the bus mutex. Returns false (and sets fault) if the card won't open.
+bool AppRecorderModel::OpenNewFile() {
+    bus_take();
     wav_file = SD.open(last_filename, FILE_WRITE);
-    if (!wav_file) {
-        Serial.printf("[REC] Failed to open %s\n", last_filename);
+    bool ok = (bool)wav_file;
+    if (ok) {
+        RecWavHeader header;  // zeroed sizes — finalised on stop
+        ok = (wav_file.write((uint8_t*)&header, sizeof(header)) == sizeof(header));
+    }
+    bus_give();
+    if (!ok) {
+        Serial.printf("[REC] writer: failed to open %s\n", last_filename);
+        SetFault("SD open failed");
         return false;
     }
+    return true;
+}
 
-    // Placeholder header (zeroed sizes) — finalised on stop.
-    RecWavHeader header;
-    wav_file.write((uint8_t*)&header, sizeof(header));
+// --- SD-writer task body (pinned to core 0, PRD §6) -------------------------
+void AppRecorderModel::WriterTrampoline(void* arg) {
+    static_cast<AppRecorderModel*>(arg)->WriterLoop();
+    vTaskDelete(nullptr);
+}
 
-    total_bytes   = 0;
-    level         = 0;
-    rec_start_ms  = millis();
-    last_flush_ms = rec_start_ms;
-    recording     = true;
-    g_lcd_flush_suppress = true;   // SD owns the SPI bus while recording
+void AppRecorderModel::WriterLoop() {
+    // 32 KB drain block in internal DMA-capable RAM (SD SPI DMA reads from it).
+    uint8_t* block = (uint8_t*)heap_caps_malloc(REC_WRITE_BLOCK, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!block) { SetFault("OOM writer block"); writer_done = true; return; }
+
+    if (!OpenNewFile()) { heap_caps_free(block); writer_done = true; return; }
     Serial.printf("[REC] Recording -> %s\n", last_filename);
+
+    uint32_t last_flush = millis();
+    uint32_t last_hb    = millis();
+
+    while (true) {
+        size_t got = xStreamBufferReceive(ring, block, REC_WRITE_BLOCK, pdMS_TO_TICKS(100));
+        if (got > 0) {
+            bus_take();
+            size_t w = wav_file.write(block, got);
+            bus_give();
+            if (w != got) {
+                // FR15 (resolved per §11): a single SD.end()/begin() does NOT clear
+                // the observed wedge — it needs a full power cycle (bench-confirmed
+                // 2026-05-31). So re-init is dead code; we go straight to stop-with-
+                // error. File stays valid up to the last 5 s header rewrite.
+                Serial.printf("[REC] SD SHORT WRITE got=%u/%u at %u bytes — STOP\n",
+                              (unsigned)w, (unsigned)got, (unsigned)bytes_written);
+                Serial.flush();
+                SetFault("SD fault - restart device");
+                break;
+            }
+            bytes_written += w;
+        }
+
+        uint32_t now = millis();
+        if (now - last_flush >= REC_FLUSH_MS) {     // FR12 power-loss-safe header
+            bus_take();
+            WriteHeader();
+            wav_file.flush();
+            bus_give();
+            last_flush = now;
+        }
+
+        // [INSTR] soak telemetry (remove per K6 once SC1 passes): bytes, free
+        // PSRAM (SC7 leak check), writer stack head-room.
+        if (now - last_hb >= 15000) {
+            last_hb = now;
+            Serial.printf("[INSTR] hb t=%lus written=%u (%us)  psram_free=%u  stack_hw=%u\n",
+                          (unsigned long)(now / 1000), (unsigned)bytes_written,
+                          (unsigned)(bytes_written / (REC_SAMPLE_RATE * 2)),
+                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                          (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+            Serial.flush();
+        }
+
+        if (stop_requested) {                        // FR13 drain-and-finalise handshake
+            while ((got = xStreamBufferReceive(ring, block, REC_WRITE_BLOCK, 0)) > 0) {
+                bus_take();
+                size_t w = wav_file.write(block, got);
+                bus_give();
+                if (w != got) { SetFault("SD fault - restart device"); break; }
+                bytes_written += w;
+            }
+            break;
+        }
+    }
+
+    // Finalise: real header on a clean stop; best-effort on a fault (the 5 s
+    // periodic rewrite already left the file playable up to ~5 s before the fault).
+    bus_take();
+    WriteHeader();
+    wav_file.flush();
+    wav_file.close();
+    bus_give();
+    Serial.printf("[REC] Saved %s (%u bytes, %us)%s\n", last_filename,
+                  (unsigned)bytes_written, (unsigned)(bytes_written / (REC_SAMPLE_RATE * 2)),
+                  fault ? "  [FAULT]" : "");
+    Serial.flush();
+
+    heap_caps_free(block);
+    writer_done = true;
+}
+
+// --- lifecycle (core 1) -----------------------------------------------------
+bool AppRecorderModel::StartRecording() {
+    if (recording) return false;
+    fault = false; fault_msg[0] = 0;
+    if (!InitSD()) { SetFault("No SD card"); return false; }   // FR18
+
+    snprintf(last_filename, sizeof(last_filename), "/REC_%03d.wav", file_num);
+
+    // FR1: allocate the 1 MB ring in PSRAM. StreamBuffer needs storage+1 bytes.
+    ring_storage = (uint8_t*)heap_caps_malloc(REC_RING_BYTES + 1, MALLOC_CAP_SPIRAM);
+    if (!ring_storage) { SetFault("PSRAM alloc failed"); return false; }  // FR3
+    ring = xStreamBufferCreateStatic(REC_RING_BYTES + 1, /*trigger=*/REC_WRITE_BLOCK,
+                                     ring_storage, &ring_struct);
+    if (!ring) {
+        heap_caps_free(ring_storage); ring_storage = nullptr;
+        SetFault("ring create failed"); return false;
+    }
+
+    bytes_written  = 0;
+    level          = 0;
+    mic_fail_streak = 0;
+    stop_requested = false;
+    writer_done    = false;
+    recording      = true;
+
+    // FR4 / D9: writer pinned to core 0 (idle during capture — WiFi is OFF).
+    BaseType_t ok = xTaskCreatePinnedToCore(WriterTrampoline, "sd_writer",
+                                            /*stack bytes=*/8192, this,
+                                            /*prio=*/5, &writer_task, /*core=*/0);
+    if (ok != pdPASS) {
+        recording = false;
+        vStreamBufferDelete(ring); ring = nullptr;
+        heap_caps_free(ring_storage); ring_storage = nullptr;
+        SetFault("writer task failed");
+        return false;
+    }
     return true;
 }
 
 void AppRecorderModel::StopRecording() {
     if (!recording) return;
-    recording = false;
-    level     = 0;
+    recording      = false;   // capture stops pushing immediately
+    stop_requested = true;     // writer drains the remainder, finalises, closes
 
-    WriteHeader();              // final SD writes still need the bus to itself
-    wav_file.close();
-    g_lcd_flush_suppress = false;  // recording done — LCD may use the bus again
-    Serial.printf("[REC] Saved %s (%u bytes, %us)\n", last_filename, total_bytes,
-                  total_bytes / (REC_SAMPLE_RATE * 2));
+    // Wait for the writer's drain-and-finalise handshake (FR13). Generous cap —
+    // a dead-card writer still returns within the SD driver timeout, not forever.
+    uint32_t t0 = millis();
+    while (!writer_done && (millis() - t0) < 8000) vTaskDelay(pdMS_TO_TICKS(10));
+    if (!writer_done) Serial.println("[REC] WARN: writer did not finish in time");
+
+    vTaskDelay(pdMS_TO_TICKS(20));   // let the trampoline self-delete
+    writer_task = nullptr;
+    if (ring) { vStreamBufferDelete(ring); ring = nullptr; }       // FR1 free on stop
+    if (ring_storage) { heap_caps_free(ring_storage); ring_storage = nullptr; }
+
+    level          = 0;
+    stop_requested = false;
     file_num++;
 }
 
-bool AppRecorderModel::WriteChunk() {
+// --- capture (core 1, LVGL timer) -------------------------------------------
+bool AppRecorderModel::CaptureChunk() {
     if (!recording) return false;
 
-    // [INSTR] 15s heap/timeline heartbeat — fires whether or not the mic is
-    // healthy, so we get a clean slope right up to and past the ~6.5-min mark.
-    {
-        static uint32_t instr_last = 0;
-        uint32_t now_i = millis();
-        if (now_i - instr_last >= 15000) {
-            instr_last = now_i;
-            InstrHeap("hb", total_bytes / (REC_CHUNK_SIZE * sizeof(int16_t)));
-        }
-    }
-
     if (!M5.Mic.record(rec_chunk, REC_CHUNK_SIZE, REC_SAMPLE_RATE)) {
-        // [INSTR] capture exact state the instant the mic first stops delivering.
-        if (mic_fail_streak == 0) {
-            InstrHeap("MIC-FIRST-FAIL", total_bytes / (REC_CHUNK_SIZE * sizeof(int16_t)));
-        }
-        // Silent mic failure — the cause of the ~6-min cut-off. Track the streak;
-        // if it persists, auto-rollover (finalise this file, reset codec, start
-        // the next file) so the meeting keeps recording without user action.
-        mic_fail_streak++;
-        static uint32_t last_log_ms = 0;
-        if (millis() - last_log_ms > 5000) {
-            Serial.printf("[REC] mic.record FAIL  streak=%u  total_bytes=%u  "
-                          "audio_secs=%u\n",
-                          mic_fail_streak, total_bytes,
-                          total_bytes / (REC_SAMPLE_RATE * 2));
-            last_log_ms = millis();
-        }
-        // ~30 consecutive failures @ 33 ms timer ≈ 1 s of dead air → roll over.
-        // Rate-limited so we don't tight-loop if the recovery itself fails.
-        const uint32_t FAIL_THRESHOLD = 30;
-        const uint32_t ROLLOVER_MIN_INTERVAL_MS = 10000;
-        if (mic_fail_streak >= FAIL_THRESHOLD &&
-            millis() - last_rollover_ms >= ROLLOVER_MIN_INTERVAL_MS) {
-            RolloverFile();
+        // mic-fail trigger retained (PRD §2.2) but recovery is a codec reset on
+        // THIS thread (the mic owner) — NOT a file rollover (the writer owns the
+        // file now). Same file continues after a brief gap. Rate-limited.
+        if (++mic_fail_streak >= 30 && (millis() - last_mic_reset_ms) >= 10000) {
+            Serial.printf("[REC] mic-fail streak=%u — resetting codec\n", mic_fail_streak);
+            M5.Mic.end(); delay(20); M5.Mic.begin();
+            mic_fail_streak  = 0;
+            last_mic_reset_ms = millis();
         }
         return false;
     }
-    // Successful read clears the streak.
     mic_fail_streak = 0;
 
-    // SD safety + RETRY: a short write means the SD write didn't fully persist.
-    // Bisection (T/U/V/W tests) proved the card, SPI bus, header-seek, and
-    // mic+SD are each rock-solid in isolation — short writes ONLY appear with
-    // mic + LCD + SD all active, i.e. a transient three-way resource collision
-    // that nicks one write. Treating that as fatal (the old behaviour) threw away
-    // the rest of the meeting. Instead, rewind to the chunk start and retry: a
-    // transient glitch succeeds within a couple of attempts. Only a SUSTAINED
-    // failure (card genuinely gone) falls through to rollover.
+    // FR2: push raw PCM into the ring, NON-blocking (timeout 0). Never blocks,
+    // never touches SD or the bus mutex. A short send = ring full = the card has
+    // stalled longer than ~30 s of buffer = it's dead → stop-with-error (FR14).
     const size_t want = REC_CHUNK_SIZE * sizeof(int16_t);
-    size_t got = wav_file.write((uint8_t*)rec_chunk, want);
-    if (got != want) {
-        const uint32_t MAX_RETRIES = 12;
-        uint32_t retries = 0;
-        while (got != want && retries < MAX_RETRIES) {
-            ++retries;
-            wav_file.seek(sizeof(RecWavHeader) + total_bytes);  // rewind to chunk start
-            delay(2);                                            // let the bus/card settle
-            got = wav_file.write((uint8_t*)rec_chunk, want);
-        }
-        if (got != want) {
-            Serial.printf("[REC] SD WRITE SHORT after %u retries (got %u/%u, total %u) "
-                          "— rolling to a fresh file\n",
-                          retries, (unsigned)got, (unsigned)want, total_bytes);
-            Serial.flush();
-            RolloverFile();   // keep the meeting alive in a new file, don't hard-stop
-            return false;
-        }
-        Serial.printf("[REC] SD write recovered after %u retr%s (at %u bytes)\n",
-                      retries, retries == 1 ? "y" : "ies", total_bytes);
+    size_t sent = xStreamBufferSend(ring, rec_chunk, want, 0);
+    if (sent != want) {
+        Serial.printf("[REC] RING OVERRUN (sent %u/%u) — card too slow, STOP\n",
+                      (unsigned)sent, (unsigned)want);
         Serial.flush();
-    }
-    total_bytes += got;
-
-    // Peak level for the VU meter (0..100).
-    int32_t peak = 0;
-    for (size_t i = 0; i < REC_CHUNK_SIZE; ++i) {
-        int32_t a = rec_chunk[i] < 0 ? -rec_chunk[i] : rec_chunk[i];
-        if (a > peak) peak = a;
-    }
-    uint32_t pct = (uint32_t)peak * 100 / 32768;
-    level = pct > 100 ? 100 : (uint8_t)pct;
-
-    // Periodic header flush for power-loss safety.
-    uint32_t now = millis();
-    if (now - last_flush_ms >= REC_FLUSH_MS) {
-        WriteHeader();
-        wav_file.flush();
-        last_flush_ms = now;
+        SetFault("SD too slow - stopped");
     }
     return true;
 }
 
 uint32_t AppRecorderModel::RecordingSeconds() {
-    if (!recording) return 0;
-    // Return actual audio captured (not wall-clock), so the UI never lies if
-    // the mic silently stops producing samples — the timer will freeze at the
-    // last good second instead of climbing while no bytes are being written.
-    return total_bytes / (REC_SAMPLE_RATE * 2);
-}
-
-// Recover from a silent mic-codec fault mid-recording: finalise the current
-// file, reset the I2S/mic path (without touching the speaker — that would
-// release the codec entirely), and open the next REC_NNN.wav. The meeting
-// continues as a chain of back-to-back files, no user action required.
-bool AppRecorderModel::RolloverFile() {
-    if (!recording) return false;
-    Serial.printf("[REC] AUTO-ROLLOVER triggered  streak=%u  bytes=%u\n",
-                  mic_fail_streak, total_bytes);
-
-    Serial.println("[INSTR] rollover> StopRecording()...");        Serial.flush();
-    StopRecording();           // finalises the WAV, increments file_num
-    Serial.println("[INSTR] rollover> StopRecording() done; Mic.end()..."); Serial.flush();
-    M5.Mic.end();
-    Serial.println("[INSTR] rollover> Mic.end() done; delay+Mic.begin()...");  Serial.flush();
-    delay(50);                 // brief settle so the I2S driver tears down clean
-    M5.Mic.begin();
-    Serial.println("[INSTR] rollover> Mic.begin() done; StartRecording()..."); Serial.flush();
-
-    bool ok = StartRecording();
-    Serial.printf("[INSTR] rollover> StartRecording() -> %d\n", ok); Serial.flush();
-    if (ok) {
-        mic_fail_streak     = 0;
-        last_rollover_ms    = millis();
-        rolled_over_pending = true;  // signal controller to notify the new file
-        Serial.printf("[REC] AUTO-ROLLOVER -> %s\n", last_filename);
-    } else {
-        Serial.println("[REC] AUTO-ROLLOVER failed (StartRecording returned false)");
-    }
-    return ok;
-}
-
-bool AppRecorderModel::RolloverHappened() {
-    bool r = rolled_over_pending;
-    rolled_over_pending = false;
-    return r;
+    // From audio actually persisted to SD (FR19) — the ticker reflects real
+    // captured seconds and never climbs while bytes aren't reaching the card.
+    return bytes_written / (REC_SAMPLE_RATE * 2);
 }

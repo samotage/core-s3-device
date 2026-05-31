@@ -4,12 +4,22 @@
 #include "lvgl.h"
 #include "config.h"
 #include <SD.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/stream_buffer.h"
+#include "freertos/task.h"
 
 // Meeting-recorder capture format: 16 kHz, mono, 16-bit PCM.
-// Whisper-ready with zero conversion. ~115 MB/hour.
+// Whisper/Parakeet-ready with zero conversion. ~115 MB/hour, 32 KB/s.
 #define REC_SAMPLE_RATE 16000
 #define REC_CHUNK_SIZE  1024  // 64 ms of audio per chunk @ 16 kHz
 #define REC_FLUSH_MS    5000  // re-write WAV header every 5 s (power-loss safety)
+
+// SD-write-architecture remediation (PRD §3): a PSRAM ring buffer decouples
+// capture (core 1) from the SD-writer task (core 0). The ring absorbs the
+// up-to-1.6 s GC stalls that the card can take mid-write, so capture never
+// blocks on SD and a stall never loses samples.
+#define REC_RING_BYTES   (1024UL * 1024UL)  // 1 MB PSRAM ≈ 30 s @ 32 KB/s (D1)
+#define REC_WRITE_BLOCK  (32UL * 1024UL)     // 32 KB drain block (D2)
 
 namespace Page {
 
@@ -41,46 +51,63 @@ class AppRecorderModel {
     bool IsSDCardPresent();  // TF-detect on AW9523 P0.4
     uint64_t SDFreeMB();
 
+    // Lifecycle. StartRecording allocates the ring + spawns the core-0 writer
+    // task (which owns the file); StopRecording runs the drain-and-finalise
+    // handshake, then tears the ring + task down.
     bool StartRecording();
     void StopRecording();
-    bool WriteChunk();  // pull one mic chunk -> SD, update level + byte count
 
-    // Auto-rollover: finalise current file, reset the mic codec, start the next
-    // file — recovers from a silent M5.Mic.record() fault without user action.
-    // Called automatically from WriteChunk on a sustained failure streak.
-    bool RolloverFile();
-    bool RolloverHappened();  // returns + clears the pending flag (for the controller)
+    // Capture path (core 1, LVGL timer): pull one mic chunk and push it into
+    // the ring. Never performs an SD write and never blocks on the bus mutex.
+    bool CaptureChunk();
 
-    bool IsRecording() { return recording; }
-    uint32_t RecordingSeconds();
+    bool IsRecording()   { return recording; }
+    bool HasFault()      { return fault; }            // FR16: drives visible error
+    const char* FaultMsg() { return fault_msg; }
+    uint32_t RecordingSeconds();                      // FR19: from bytes persisted
     const char* LastFilename() { return last_filename; }
-    uint8_t InputLevel() { return level; }  // 0..100 peak, for the VU bar
+    uint8_t InputLevel() { return level; }            // VU deferred (D5) — stays 0
 
    private:
-    bool recording        = false;
-    File wav_file;
-    uint32_t total_bytes  = 0;
-    uint32_t rec_start_ms = 0;
-    uint32_t last_flush_ms = 0;
+    // --- handoff state, capture (core 1) <-> writer (core 0) ----------------
+    // Single-writer-per-field; 32-bit aligned access is atomic on Xtensa, so
+    // plain volatile is sufficient for these flags/counters (SPSC discipline).
+    volatile bool recording        = false;
+    volatile bool stop_requested   = false;
+    volatile bool writer_done      = false;
+    volatile bool fault            = false;
+    volatile uint32_t bytes_written = 0;   // PCM bytes persisted to SD (drives ticker)
+    char fault_msg[40]             = {0};
+
+    StreamBufferHandle_t ring        = nullptr;
+    StaticStreamBuffer_t ring_struct = {};
+    uint8_t* ring_storage            = nullptr;  // 1 MB in PSRAM
+    TaskHandle_t writer_task         = nullptr;
+
+    File wav_file;                          // writer-task-owned ONLY (D10)
     int file_num          = 1;
-    int16_t rec_chunk[REC_CHUNK_SIZE];
     char last_filename[24] = {0};
+    int16_t rec_chunk[REC_CHUNK_SIZE];      // capture scratch (internal RAM)
     bool sd_ready          = false;
     uint8_t level          = 0;
 
-    // Auto-rollover state: tracks the consecutive-mic-failure streak that signals
-    // the codec has silently faulted, and rate-limits rollover attempts.
+    // mic-fail codec-recovery (mic-fail trigger retained per PRD §2.2; the
+    // SD-short-write rollover trigger is removed — K4).
     uint32_t mic_fail_streak  = 0;
-    uint32_t last_rollover_ms = 0;
-    bool rolled_over_pending  = false;
+    uint32_t last_mic_reset_ms = 0;
 
     int FindNextFileNum();
-    void WriteHeader();  // seek 0, write current sizes, return to append point
+
+    // --- writer-task internals (run on core 0) ------------------------------
+    void WriteHeader();                       // seek0/write/seek-end, writer-side
+    bool OpenNewFile();                        // open + placeholder header
+    void WriterLoop();                         // the task body
+    static void WriterTrampoline(void* arg);
+    void SetFault(const char* msg);
 };
 
 // App-level singleton: lives across page navigation so recording survives
-// switching to Files / Settings / Menu. Created in App_Init(), torn down in
-// App_Uninit(). Pages READ from this pointer — they MUST NOT own its lifecycle.
+// switching to Files / Settings / Menu. Created in App_Init().
 extern AppRecorderModel* g_app_recorder_model;
 
 }  // namespace Page
