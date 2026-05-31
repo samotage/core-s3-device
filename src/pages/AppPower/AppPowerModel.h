@@ -56,6 +56,11 @@ class AppPowerModel {
    // verification of the ONLEVEL/OFFLEVEL config over serial.
    uint8_t ReadPowerKeyReg();
 
+   // Dump battery / power-source state over serial (vbat, vbus, charge status,
+   // and the BATFET / PMU-config registers) — diagnoses whether the battery is
+   // actually feeding the PMU when USB is removed (battery-only power-on).
+   void DumpPowerState();
+
    // AXP2101 hardware shutdown (FR26, FR32). After this call the device is
    // off; only the power-key (AXP2101 hardware) can wake it.
    void PowerOff();

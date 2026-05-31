@@ -160,17 +160,24 @@ The Power Off main-menu entry SHALL trigger an AXP2101 hardware shutdown behind 
 ---
 
 ### Requirement: Quick-Tap Power-On From Hardware-Off
-After a full AXP2101 hardware power-off (`PowerOff()` drops the system rails while the PMU stays alive on battery), the device SHALL power back on from a **short press** of the physical power key — a deliberate quick tap, not a multi-second hold. The firmware SHALL explicitly configure the AXP2101 power-key on-level (register 0x27, ONLEVEL field) to a short press duration during boot, rather than relying on the M5Unified default, so a library change cannot silently lengthen the required press. The configured register value SHALL be logged over serial at boot for verification.
+After a full AXP2101 hardware power-off, the device SHALL power back on from a **short press** of the physical power key — a deliberate quick tap, not a multi-second hold — **whether running on battery alone or on USB power**. The firmware SHALL explicitly configure two AXP2101 power-key behaviours during boot, rather than relying on the M5Unified default, so a library change cannot silently break them, and SHALL log the configured register values over serial at boot for verification:
+
+1. **Power-key on-level** (register 0x27, ONLEVEL field) set to a short press duration so a quick tap boots the device.
+2. **Battery-FET retention through power-off** (register 0x12, bit 3 `batfet_poweroff_enable`) enabled, so that on a battery-only power-off the battery FET stays closed and the battery remains connected to the system rail — otherwise the FET opens at power-off, the device goes fully dead, and only a USB VBUS-insert can restart it (observed defect, 2026-06-01).
 
 Rationale: this is a portable field recorder. Requiring a multi-second hold to power on (the observed pre-fix behaviour) makes the device feel dead in the hand and is unacceptable for field use.
 
 #### Scenario: Short press boots from hardware-off
-- **WHEN** the device has been powered off via `PowerOff()` (battery present) and the user gives the power key a short tap
+- **WHEN** the device has been powered off (battery present) and the user gives the power key a short tap
 - **THEN** the device boots to the recorder screen — no multi-second hold is required
+
+#### Scenario: Battery-only power-off and restart
+- **WHEN** the device is on battery only (USB disconnected) and is powered off, then the power key is tapped
+- **THEN** the battery FET remained connected through the power-off and the device powers back on from battery — it does NOT go permanently dead requiring a USB insert
 
 #### Scenario: Power-key configuration is explicit and verifiable
 - **WHEN** the device boots
-- **THEN** the firmware writes the AXP2101 power-key timing register (0x27) to a known ONLEVEL value and logs the before/after register value over serial
+- **THEN** the firmware writes the AXP2101 power-key on-level (0x27 ONLEVEL) and the battery-FET-poweroff-retention bit (0x12 bit 3) to known values and logs the before/after register values over serial
 
 #### Scenario: USB-insertion power-on remains a recovery path
 - **WHEN** the device is off and USB power is connected

@@ -142,11 +142,47 @@ void AppPowerModel::ConfigurePowerKey() {
     Serial.printf("[PWR] power-key reg 0x27: before=0x%02X after=0x%02X  "
                   "ONLEVEL=%s (tap-to-boot)\n",
                   before, after, kOnLevel[after & 0x03]);
+
+    // FR-PWRON (battery path): keep the battery FET connected through a power-off
+    // so the device can power back on from battery alone in the field. AXP2101
+    // reg 0x12 bit3 = "batfet_poweroff_enable" ("BATFET enable when POWEROFF and
+    // Battery only"). The CoreS3 default is 0 (M5.begin does not write 0x12), so
+    // at a battery-only power-off the FET OPENS, disconnecting the battery — the
+    // device goes fully dead and only a USB VBUS-insert can restart it (observed
+    // on the bench 2026-06-01). Setting bit3 keeps the FET closed through power-
+    // off so a power-key tap restarts from battery. Bit1 (OCP) left as-is.
+    // Source: AXP2101 datasheet reg 0x12 (BATFET control).
+    uint8_t bf_before = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x12, 100000L);
+    M5.In_I2C.bitOn(AXP2101_ADDR, 0x12, 0x08, 100000L);  // set bit3
+    uint8_t bf_after = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x12, 100000L);
+    Serial.printf("[PWR] BATFET reg 0x12: before=0x%02X after=0x%02X  "
+                  "poweroff-batt-keep=%d\n",
+                  bf_before, bf_after, (bf_after >> 3) & 1);
     Serial.flush();
 }
 
 uint8_t AppPowerModel::ReadPowerKeyReg() {
     return M5.In_I2C.readRegister8(AXP2101_ADDR, 0x27, 100000L);
+}
+
+void AppPowerModel::DumpPowerState() {
+    AxpAdcSampling();  // fills vbat, vbus, vsys (mV)
+    uint8_t chg = AxpBatIsCharging();  // 0:standby 1:charging 2:discharging
+    // Raw AXP2101 status/config regs (interpreted against the X-Powers datasheet):
+    //   0x00 PMU status1 : bit5 = VBUS good, bit3 = battery-present/activate
+    //   0x01 PMU status2 : bits[6:5] = charge state
+    //   0x12 BATFET ctrl : bit0 = BATFET on (battery connected to system rail)
+    //   0x10 PMU common config
+    //   0x18 charger/term config
+    uint8_t st0    = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x00, 100000L);
+    uint8_t st1    = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x01, 100000L);
+    uint8_t batfet = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x12, 100000L);
+    uint8_t cfg10  = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x10, 100000L);
+    uint8_t cfg18  = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x18, 100000L);
+    Serial.printf("[BAT] vbat=%.0fmV vbus=%.0fmV vsys=%.0fmV chg=%u | "
+                  "0x00=0x%02X 0x01=0x%02X BATFET(0x12)=0x%02X 0x10=0x%02X 0x18=0x%02X\n",
+                  vbat, vbus, vsys, chg, st0, st1, batfet, cfg10, cfg18);
+    Serial.flush();
 }
 
 void AppPowerModel::PowerOff() {

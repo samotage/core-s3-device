@@ -119,6 +119,11 @@ void AppRecorder::Update() {
             Serial.printf("[PWR] power-key reg 0x27=0x%02X  ONLEVEL=%s\n",
                           v, onl[v & 0x03]);
             Serial.flush();
+        } else if (c == 'b') {
+            // Bench diagnostic: dump battery / power-source state (vbat, vbus,
+            // charge, BATFET) to diagnose battery-only power-on.
+            AppPowerModel pm;
+            pm.DumpPowerState();
         }
     }
 
