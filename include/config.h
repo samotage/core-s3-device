@@ -53,6 +53,6 @@
 #define CRITICAL_BATTERY_VOLTAGE_MV 3300
 
 // Default brightness on boot (Settings page overrides at runtime).
-#define DEFAULT_BRIGHTNESS 80
+#define DEFAULT_BRIGHTNESS 180
 
 #endif  // __CONFIG_H

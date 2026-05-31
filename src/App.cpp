@@ -10,12 +10,18 @@
 // lv_disp_get_inactive_time(); we just decide when to dim and when to wake.
 static bool g_backlight_on = true;
 
-// Polled every 200 ms: when inactive > SCREEN_IDLE_TIMEOUT_MS, drop backlight
-// to 0; when inactivity resets (user touched) and backlight is off, restore.
+// Polled every 200 ms. Auto-off (FR19-21) exists to save battery/burn-in during
+// a long recording — when the device sits on a table capturing a meeting. When
+// the device is IDLE (not recording) the screen stays on: a blanked idle screen
+// is indistinguishable from a dead device and made field/bench testing read every
+// healthy boot as "dead". So: only blank while a recording is active; otherwise
+// keep the backlight on. Touch still resets the idle timer during recording.
 static void screen_idle_tick(lv_timer_t* t) {
     (void)t;
+    bool recording = Page::g_app_recorder_model &&
+                     Page::g_app_recorder_model->IsRecording();
     uint32_t inactive = lv_disp_get_inactive_time(NULL);
-    if (inactive >= SCREEN_IDLE_TIMEOUT_MS) {
+    if (recording && inactive >= SCREEN_IDLE_TIMEOUT_MS) {
         if (g_backlight_on) {
             M5.Display.setBrightness(0);
             g_backlight_on = false;
