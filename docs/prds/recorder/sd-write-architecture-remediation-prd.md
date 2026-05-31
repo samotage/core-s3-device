@@ -260,11 +260,13 @@ Guidance, not requirements — grounded in the current codebase.
 - **Threading:** Arduino `loop()` runs on core 1 (`ARDUINO_RUNNING_CORE`); pin the writer with `xTaskCreatePinnedToCore(..., /*core=*/0)`. WiFi is off during capture, so core 0 is free.
 - **Mic-fail rollover:** `RolloverFile()` and the mic-fail-streak logic stay; only the SD-short-write call site (`AppRecorderModel.cpp:207`) is removed (K4).
 - **Power-off/critical-battery flows:** ensure the standalone-experience finalise paths (FR29/FR31/FR32 of `recorder-standalone-experience-prd.md`) route through the new writer stop handshake (FR13), not a direct `wav_file.close()`.
+- **Ring primitive (recommended):** FreeRTOS `StreamBuffer` — the natural single-producer (capture) / single-consumer (writer) byte-stream primitive: lock-free, with a built-in blocking drain for the writer task. To be confirmed by Chip during implementation.
+- **Soak harness (reuse, do not rebuild):** the acceptance soak harness already exists from the 2026-05-31 bench debugging — serial `r`/`s` recording triggers plus an instrumented pyserial capture (heap/DMA heartbeat, short-write/wedge detection). The orchestration TEST phase reuses it directly for the SC1 3× 30-min gate. Scripts and full diagnostic trail are in Chip's engineering log.
 
 ---
 
 ## 11. Open Items for Implementation Detail (Chip)
 
 - Confirm whether a single `SD.end()/begin()` actually clears the observed wedge; if it cannot, drop FR15's re-init to stop-only (the re-init becomes dead code).
-- Choose the ring primitive (FreeRTOS stream buffer vs. custom PSRAM ring + task notification) and the capture-side push mechanism (LVGL timer vs. dedicated capture task) such that capture never blocks on the bus mutex.
+- Confirm the ring primitive — leaning FreeRTOS `StreamBuffer` (single-producer/single-consumer, lock-free, blocking drain) — and the capture-side push mechanism (LVGL timer vs. dedicated capture task) such that capture never blocks on the bus mutex.
 - Confirm the exact `MALLOC_CAP_SPIRAM` free figure on the next boot to validate the 1 MB allocation headroom.
