@@ -58,6 +58,10 @@ void setup() {
     {
         Page::AppPowerModel pm;
         pm.AxpAdcEnable();
+        // FR-PWRON: quick-tap power-on from hardware-off (AXP2101 reg 0x27
+        // ONLEVEL). Re-asserts the short power-on press so a normal tap boots
+        // the device in the field. Logs the before/after register over serial.
+        pm.ConfigurePowerKey();
     }
 
     lv_init();

@@ -109,6 +109,16 @@ void AppRecorder::Update() {
             Net::Server.setRecording(false);
             Net::Server.requestNotify();
             View.SetSaved(Model()->LastFilename(), last_sec);
+        } else if (c == 'p') {
+            // Bench diagnostic: dump the AXP2101 power-key timing register so the
+            // FR-PWRON quick-tap config can be verified on demand (boot-time
+            // capture is unreliable on the CoreS3 USB-Serial/JTAG re-enum).
+            AppPowerModel pm;
+            uint8_t v = pm.ReadPowerKeyReg();
+            static const char* onl[] = {"128ms", "512ms", "1s", "2s"};
+            Serial.printf("[PWR] power-key reg 0x27=0x%02X  ONLEVEL=%s\n",
+                          v, onl[v & 0x03]);
+            Serial.flush();
         }
     }
 

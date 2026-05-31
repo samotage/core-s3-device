@@ -45,6 +45,17 @@ class AppPowerModel {
    // auto-save + shutdown on a low battery.
    bool IsCriticalBattery();
 
+   // Explicitly own the AXP2101 power-key timing (FR-PWRON: quick-tap power-on
+   // from a full hardware-off). Sets reg 0x27 so a short press of the power key
+   // boots the device, independent of the M5Unified default. Logs the before/
+   // after register value over serial for verification. Call once in setup()
+   // after M5.begin().
+   void ConfigurePowerKey();
+
+   // Read the AXP2101 power-key timing register (0x27) — for on-demand
+   // verification of the ONLEVEL/OFFLEVEL config over serial.
+   uint8_t ReadPowerKeyReg();
+
    // AXP2101 hardware shutdown (FR26, FR32). After this call the device is
    // off; only the power-key (AXP2101 hardware) can wake it.
    void PowerOff();

@@ -116,6 +116,39 @@ bool AppPowerModel::IsCriticalBattery() {
     return RecorderMath::IsCriticalBattery(mv);
 }
 
+void AppPowerModel::ConfigurePowerKey() {
+    // AXP2101 reg 0x27 = IRQLEVEL[5:4] / OFFLEVEL[3:2] / ONLEVEL[1:0].
+    // Source: AXP2101 datasheet reg 0x27 (X-Powers, "IRQLEVEL/OFFLEVEL/ONLEVEL").
+    //   ONLEVEL  (power-ON  press time) : 00=128ms 01=512ms 10=1s 11=2s
+    //   OFFLEVEL (power-OFF hold  time) : 00=4s    01=6s    10=8s 11=10s
+    //   IRQLEVEL (PWROK/IRQ)            : 00=1s    01=1.5s  10=2s 11=2.5s
+    //
+    // FR-PWRON: set ONLEVEL=128ms so a quick tap of the power key boots the
+    // device from a full AXP power-off (PowerOff() drops the rails; the AXP stays
+    // alive on battery and powers the system back up on a PWRON press >= ONLEVEL).
+    // M5.begin() already writes 0x27=0x00, but we re-assert it explicitly here so
+    // a M5Unified version bump can never silently lengthen the power-on press and
+    // resurrect the "had to hold ~2s to boot" defect.
+    //
+    // OFFLEVEL/IRQLEVEL left at the M5 default (4s / 1s). Trade-off: 128ms is
+    // intentionally short for a true "quick tap"; if accidental power-ons in
+    // transit are ever observed, raise ONLEVEL to 0b01 (512ms) — a one-nibble
+    // change to kPowerKeyCfg.
+    const uint8_t kPowerKeyCfg = 0x00;  // ONLEVEL=128ms, OFFLEVEL=4s, IRQLEVEL=1s
+    uint8_t before = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x27, 100000L);
+    M5.In_I2C.writeRegister8(AXP2101_ADDR, 0x27, kPowerKeyCfg, 100000L);
+    uint8_t after = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x27, 100000L);
+    static const char* kOnLevel[] = {"128ms", "512ms", "1s", "2s"};
+    Serial.printf("[PWR] power-key reg 0x27: before=0x%02X after=0x%02X  "
+                  "ONLEVEL=%s (tap-to-boot)\n",
+                  before, after, kOnLevel[after & 0x03]);
+    Serial.flush();
+}
+
+uint8_t AppPowerModel::ReadPowerKeyReg() {
+    return M5.In_I2C.readRegister8(AXP2101_ADDR, 0x27, 100000L);
+}
+
 void AppPowerModel::PowerOff() {
     // AXP2101 register 0x10 bit 0 = power-off command.
     // Writing the bit triggers hardware shutdown immediately.
