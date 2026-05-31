@@ -1,3 +1,9 @@
+---
+validation:
+  status: valid
+  validated_at: '2026-05-31T16:28:19+10:00'
+---
+
 ## Product Requirements Document (PRD) — SD Write Architecture Remediation
 
 **Project:** CoreS3 Meeting Recorder
