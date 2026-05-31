@@ -122,7 +122,6 @@ void AppRecorderModel::WriterLoop() {
     Serial.printf("[REC] Recording -> %s\n", last_filename);
 
     uint32_t last_flush = millis();
-    uint32_t last_hb    = millis();
 
     while (true) {
         size_t got = xStreamBufferReceive(ring, block, REC_WRITE_BLOCK, pdMS_TO_TICKS(100));
@@ -151,18 +150,6 @@ void AppRecorderModel::WriterLoop() {
             wav_file.flush();
             bus_give();
             last_flush = now;
-        }
-
-        // [INSTR] soak telemetry (remove per K6 once SC1 passes): bytes, free
-        // PSRAM (SC7 leak check), writer stack head-room.
-        if (now - last_hb >= 15000) {
-            last_hb = now;
-            Serial.printf("[INSTR] hb t=%lus written=%u (%us)  psram_free=%u  stack_hw=%u\n",
-                          (unsigned long)(now / 1000), (unsigned)bytes_written,
-                          (unsigned)(bytes_written / (REC_SAMPLE_RATE * 2)),
-                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-                          (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-            Serial.flush();
         }
 
         if (stop_requested) {                        // FR13 drain-and-finalise handshake
