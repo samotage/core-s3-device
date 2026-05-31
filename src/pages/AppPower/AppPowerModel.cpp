@@ -179,9 +179,25 @@ void AppPowerModel::DumpPowerState() {
     uint8_t batfet = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x12, 100000L);
     uint8_t cfg10  = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x10, 100000L);
     uint8_t cfg18  = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x18, 100000L);
+    // Persistent power-on/off source + config — these LATCH across a power cycle,
+    // so reading them on the next USB boot tells us what happened during a
+    // battery-only off/on test we cannot watch live:
+    //   0x20 PowerOnStatus  : which source triggered the last power-ON
+    //   0x21 PowerOffStatus : which source triggered the last power-OFF
+    //   0x22 PowerOffEnable : bit1 btn_pwroff_en, bit0 btn_pwroff_mode(0=off,1=restart)
+    //   0x14 Vsys Vmin (min system voltage), 0x16 input current limit
+    uint8_t on20   = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x20, 100000L);
+    uint8_t off21  = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x21, 100000L);
+    uint8_t cfg22  = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x22, 100000L);
+    uint8_t vmin14 = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x14, 100000L);
+    uint8_t ilim16 = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x16, 100000L);
     Serial.printf("[BAT] vbat=%.0fmV vbus=%.0fmV vsys=%.0fmV chg=%u | "
-                  "0x00=0x%02X 0x01=0x%02X BATFET(0x12)=0x%02X 0x10=0x%02X 0x18=0x%02X\n",
+                  "st0(0x00)=0x%02X st1(0x01)=0x%02X BATFET(0x12)=0x%02X "
+                  "cc(0x10)=0x%02X chg(0x18)=0x%02X\n",
                   vbat, vbus, vsys, chg, st0, st1, batfet, cfg10, cfg18);
+    Serial.printf("[BAT] PWRON_src(0x20)=0x%02X PWROFF_src(0x21)=0x%02X "
+                  "PWROFF_cfg(0x22)=0x%02X Vmin(0x14)=0x%02X Ilim(0x16)=0x%02X\n",
+                  on20, off21, cfg22, vmin14, ilim16);
     Serial.flush();
 }
 
