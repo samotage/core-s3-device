@@ -138,6 +138,23 @@ String RecorderServer::hostUrl() { return String("http://") + REC_HOSTNAME + ".l
 void RecorderServer::routes() {
     server.on("/", HTTP_GET, [this]() { handleRoot(); });
     server.on("/api/recordings", HTTP_GET, [this]() { handleList(); });
+    // Operational: clear the sent-tracking marker and force a re-push of every
+    // recording on the next idle pass. Lets the upload path be re-driven without
+    // a physical re-record (USB serial control is unavailable — Serial is on UART0
+    // since ARDUINO_USB_CDC_ON_BOOT was dropped). Refused while recording.
+    server.on("/api/resync", HTTP_POST, [this]() {
+        if (recording) {
+            server.send(503, "application/json", "{\"error\":\"recording\"}");
+            return;
+        }
+        bool removed   = SD.remove(UPLOADED_MARKER);
+        upload_pending = true;
+        Serial.printf("[NET] resync: ack marker %s — re-pushing all recordings\n",
+                      removed ? "cleared" : "absent");
+        server.send(200, "application/json",
+                    String("{\"status\":\"resync\",\"ack_cleared\":") +
+                        (removed ? "true" : "false") + "}");
+    });
     server.onNotFound([this]() { handleDownload(); });  // /rec/<name>
 }
 
