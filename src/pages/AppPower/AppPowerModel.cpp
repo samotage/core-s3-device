@@ -198,10 +198,13 @@ void AppPowerModel::DumpPowerState() {
 }
 
 void AppPowerModel::PowerOff() {
-    // AXP2101 register 0x10 bit 0 = power-off command.
-    // Writing the bit triggers hardware shutdown immediately.
-    M5.In_I2C.bitOn(AXP2101_ADDR, 0x10, 0b1, 100000L);
-    // The line above does not return on real hardware; loop just in case.
+    // Use M5Unified's tested power-off path (same as the stock factory firmware)
+    // rather than a raw register poke. M5.Power.powerOff() routes through the
+    // library's full AXP2101 shutdown sequence, which leaves the PMU in the
+    // correct state for a power-key cold-start — the raw 0x10-bit0 poke we used
+    // before shut the rails but did not restore the documented power-on path.
+    M5.Power.powerOff();
+    // Does not return on real hardware; loop just in case.
     while (true) { delay(1000); }
 }
 
