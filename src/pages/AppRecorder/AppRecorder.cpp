@@ -107,7 +107,7 @@ void AppRecorder::Update() {
         } else if (c == 's' && Model()->IsRecording()) {
             Model()->StopRecording();
             Net::Server.setRecording(false);
-            Net::Server.requestNotify();
+            Net::Server.requestUpload();
             View.SetSaved(Model()->LastFilename(), last_sec);
         } else if (c == 'p') {
             // Bench diagnostic: dump the AXP2101 power-key timing register so the
@@ -214,7 +214,7 @@ void AppRecorder::onEvent(lv_event_t* event) {
         if (instance->Model()->IsRecording()) {
             instance->Model()->StopRecording();
             Net::Server.setRecording(false);
-            Net::Server.requestNotify();
+            Net::Server.requestUpload();
             instance->View.SetSaved(instance->Model()->LastFilename(),
                                     instance->last_sec);
         } else {

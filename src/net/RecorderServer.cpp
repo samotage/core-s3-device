@@ -4,10 +4,16 @@
 #include <HTTPClient.h>
 #include <ESPmDNS.h>
 #include <SD.h>
+#include "freertos/semphr.h"
 
-// WiFi credentials + Headspace URL are optional at build time: the public repo
-// compiles without include/secrets.h (recorder just runs offline). Provide it
-// to enable WiFi serving and Headspace notifications.
+// Shared SPI-bus mutex (created in m5gfx_lvgl_init). The CoreS3 LCD and SD card
+// share the SPI bus, so every SD op (writer task, upload reads here) and every
+// LCD flush must be serialised through this one mutex.
+extern SemaphoreHandle_t g_spi_bus_mutex;
+
+// WiFi credentials + Headspace upload URL are optional at build time: the public
+// repo compiles without include/secrets.h (recorder just runs offline). Provide
+// it to enable WiFi serving and Headspace uploads.
 #if defined(__has_include)
 #  if __has_include("secrets.h")
 #    include "secrets.h"
@@ -22,21 +28,23 @@
 #ifndef REC_HOSTNAME
 #  define REC_HOSTNAME "core-s3"
 #endif
-#ifndef HEADSPACE_NOTIFY_URL
-#  define HEADSPACE_NOTIFY_URL ""  // empty -> notifications disabled
+#ifndef HEADSPACE_UPLOAD_URL
+#  define HEADSPACE_UPLOAD_URL ""  // empty -> compile-time fallback disabled
 #endif
 
-// Filenames already accepted by Headspace, one per line. Lets the device avoid
-// re-notifying for the same recording across reboots.
+// Filenames already persisted by Headspace, one per line. Lets the device avoid
+// re-uploading the same recording across reboots.
 #define UPLOADED_MARKER "/UPLOADED.txt"
-#define NOTIFY_RETRY_MS 30000UL  // back-off between notify attempts while anything's un-acked
+#define UPLOAD_RETRY_MS 30000UL  // back-off between upload cycles while anything's un-acked
 
 namespace Net {
 
 RecorderServer Server;
 
 static bool creds_present() { return strlen(WIFI_SSID) > 0; }
-static bool notify_enabled() { return strlen(HEADSPACE_NOTIFY_URL) > 0; }
+
+static void bus_take() { if (g_spi_bus_mutex) xSemaphoreTake(g_spi_bus_mutex, portMAX_DELAY); }
+static void bus_give() { if (g_spi_bus_mutex) xSemaphoreGive(g_spi_bus_mutex); }
 
 void RecorderServer::begin() {
     if (!creds_present()) {
@@ -87,26 +95,31 @@ void RecorderServer::loop() {
 
     bool connected = (WiFi.status() == WL_CONNECTED);
 
-    // Bring up mDNS + HTTP once, the first time WiFi comes up.
+    // Bring up mDNS + HTTP once, the first time WiFi comes up. mDNS is torn down
+    // when WiFi goes OFF during recording (started reset to false above), so this
+    // re-runs the service browse on every recording->idle transition, not just at
+    // boot — the server's DHCP IP may have changed.
     if (connected && !started) {
         if (MDNS.begin(REC_HOSTNAME)) {
             MDNS.addService("http", "tcp", 80);
             MDNS.addServiceTxt("http", "tcp", "path", "/api/recordings");
         }
+        resolveUploadUrl();      // browse for _otl-recordings._tcp (or fallback)
         routes();
         server.begin();
         started        = true;
-        notify_pending = true;  // announce anything un-uploaded as soon as we're up
+        upload_pending = true;   // push anything un-acked as soon as we're up
         Serial.printf("[NET] Up: http://%s.local  (%s)\n", REC_HOSTNAME,
                       WiFi.localIP().toString().c_str());
     }
 
     if (started) server.handleClient();
 
-    // Notify Headspace when idle — never mid-recording (would stall capture).
+    // Push recordings to Headspace when idle — never mid-recording (WiFi is OFF
+    // then anyway). One file per loop pass keeps handleClient() responsive.
     if (started && !recording &&
-        (notify_pending || (millis() - last_notify > NOTIFY_RETRY_MS))) {
-        notifyHeadspace();
+        (upload_pending || (millis() - last_upload > UPLOAD_RETRY_MS))) {
+        uploadCycle();
     }
 
     if (!connected) {
@@ -188,18 +201,12 @@ void RecorderServer::handleDownload() {
         server.send(500, "text/plain", "open failed");
         return;
     }
-    size_t fsize = f.size();
     server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
     size_t sent = server.streamFile(f, "audio/wav");
     f.close();
-    // A fully delivered pull is the real "Headspace has it" signal — ack here,
-    // not from the notify response (single-threaded: the device can't read that
-    // response while serving this very pull).
-    if (sent == fsize) {
-        ackFile(name);
-        Serial.printf("[NET] served + acked %s (%u bytes)\n", name.c_str(),
-                      (uint32_t)sent);
-    }
+    // Diagnostics-only pull now: ack happens in the upload response handler
+    // (push model), never on a served pull.
+    Serial.printf("[NET] served %s (%u bytes)\n", name.c_str(), (uint32_t)sent);
 }
 
 void RecorderServer::handleRoot() {
@@ -232,50 +239,123 @@ void RecorderServer::ackFile(const String& name) {
     f.close();
 }
 
-// POST {device, address, recordings:[un-acked, non-empty]} to Headspace.
-// On 200 {"pulled":[...]}, ack each pulled file so we don't re-notify.
-void RecorderServer::notifyHeadspace() {
-    last_notify    = millis();
-    notify_pending = false;
-    if (!notify_enabled()) return;
+// Discover the Headspace upload endpoint. mDNS service browse takes priority;
+// the compile-time HEADSPACE_UPLOAD_URL is the fallback when the browse finds
+// nothing. If neither resolves, upload_url stays empty and uploads are disabled.
+// NOTE: queryService takes the bare service/proto — the lib prepends the '_'.
+// Passing "_otl-recordings"/"_tcp" makes the browse silently return 0 results.
+void RecorderServer::resolveUploadUrl() {
+    upload_url = "";
+    int n = MDNS.queryService("otl-recordings", "tcp");
+    if (n > 0) {
+        upload_url = String("http://") + MDNS.IP(0).toString() + ":" +
+                     String(MDNS.port(0)) + "/api/uploads/recordings";
+        Serial.printf("[NET] upload endpoint via mDNS: %s (host %s)\n",
+                      upload_url.c_str(), MDNS.hostname(0).c_str());
+        return;
+    }
+    if (strlen(HEADSPACE_UPLOAD_URL) > 0) {
+        upload_url = HEADSPACE_UPLOAD_URL;
+        Serial.printf("[NET] upload endpoint via fallback URL: %s\n", upload_url.c_str());
+        return;
+    }
+    Serial.println("[NET] no upload endpoint (mDNS browse empty, no fallback URL) — uploads disabled");
+}
 
-    // Collect un-acked, non-empty recordings into a JSON array string.
-    String list;
-    int count = 0;
+// Extract an integer "bytes_written" value from a small JSON body like
+// {"filename":"REC_001.wav","bytes_written":12345}. Returns -1 if absent.
+// The response is a tiny fixed-shape object, so a string scan avoids pulling in
+// a JSON library on the constrained device.
+static long parse_bytes_written(const String& body) {
+    int key = body.indexOf("\"bytes_written\"");
+    if (key < 0) return -1;
+    int colon = body.indexOf(':', key);
+    if (colon < 0) return -1;
+    int i = colon + 1;
+    while (i < (int)body.length() && (body[i] == ' ' || body[i] == '\t')) i++;
+    long val = 0;
+    bool any = false;
+    while (i < (int)body.length() && body[i] >= '0' && body[i] <= '9') {
+        val = val * 10 + (body[i] - '0');
+        any = true;
+        i++;
+    }
+    return any ? val : -1;
+}
+
+// Push the oldest un-acked recording to Headspace. One file per call so the web
+// server stays responsive between uploads. Streams the WAV body straight off SD
+// (never buffered in RAM) and acks only on a 201 whose bytes_written matches the
+// bytes sent — a confirmed disk write, not "bytes received".
+void RecorderServer::uploadCycle() {
+    last_upload    = millis();
+    upload_pending = false;
+    if (upload_url.length() == 0) return;  // no endpoint resolved
+
+    // Find the first un-acked, non-empty recording (oldest-first by directory
+    // order). One per cycle; the rest follow on subsequent ticks.
+    String name;
     File dir = SD.open("/");
     if (dir) {
         for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
             String base = basename_of(String(f.name()));
             if (!f.isDirectory() && is_recording_file(base) && f.size() > 44 &&
                 !fileAcked(base)) {
-                if (count++) list += ",";
-                list += "\"" + base + "\"";
+                name = base;
+                f.close();
+                break;
             }
             f.close();
         }
         dir.close();
     }
-    if (count == 0) return;  // nothing new to announce
+    if (name.length() == 0) return;  // nothing un-acked
 
-    String body = String("{\"device\":\"") + REC_HOSTNAME +
-                  "\",\"address\":\"" + WiFi.localIP().toString() +
-                  "\",\"recordings\":[" + list + "]}";
-
-    HTTPClient http;
-    http.setConnectTimeout(3000);
-    // Short read timeout on purpose: Headspace pulls the WAV from us *before*
-    // replying, and we can't serve that pull while blocked here (single-thread).
-    // So we don't wait for / parse the response — files are acked when served
-    // (handleDownload). This POST just triggers the pull.
-    http.setTimeout(4000);
-    if (!http.begin(HEADSPACE_NOTIFY_URL)) {
-        Serial.println("[NET] notify: begin failed");
+    String path = "/" + name;
+    File file = SD.open(path, FILE_READ);
+    if (!file) {
+        Serial.printf("[NET] upload: open failed %s\n", name.c_str());
         return;
     }
-    http.addHeader("Content-Type", "application/json");
-    int code = http.POST(body);
-    Serial.printf("[NET] notify sent (%d new), http=%d\n", count, code);
+    size_t fileSize = file.size();
+
+    HTTPClient http;
+    http.setConnectTimeout(5000);
+    http.setTimeout(20000);  // server confirms after the disk write completes
+    if (!http.begin(upload_url)) {
+        Serial.println("[NET] upload: begin failed");
+        file.close();
+        return;
+    }
+    http.addHeader("Content-Type", "audio/wav");
+    http.addHeader("X-Device-Id", REC_HOSTNAME);
+    http.addHeader("X-Filename", name);
+    http.addHeader("X-File-Size", String((uint32_t)fileSize));
+
+    // Stream the file body off SD. Hold the shared SPI-bus mutex across the whole
+    // transfer so SD reads can't interleave with an LCD flush on the shared bus.
+    bus_take();
+    int code = http.sendRequest("POST", &file, fileSize);
+    bus_give();
+    String resp = http.getString();
     http.end();
+    file.close();
+
+    if (code == 201) {
+        long written = parse_bytes_written(resp);
+        if (written == (long)fileSize) {
+            ackFile(name);
+            Serial.printf("[NET] uploaded + acked %s (%u bytes)\n", name.c_str(),
+                          (uint32_t)fileSize);
+            upload_pending = true;  // immediately try the next un-acked file
+        } else {
+            Serial.printf("[NET] upload %s: 201 but bytes_written=%ld != %u — not acked\n",
+                          name.c_str(), written, (uint32_t)fileSize);
+        }
+    } else {
+        Serial.printf("[NET] upload %s failed, http=%d — retry next cycle\n",
+                      name.c_str(), code);
+    }
 }
 
 }  // namespace Net
