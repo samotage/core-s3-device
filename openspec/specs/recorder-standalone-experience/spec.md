@@ -160,24 +160,28 @@ The Power Off main-menu entry SHALL trigger an AXP2101 hardware shutdown behind 
 ---
 
 ### Requirement: Quick-Tap Power-On From Hardware-Off
-After a full AXP2101 hardware power-off, the device SHALL power back on from a **short press** of the physical power key — a deliberate quick tap, not a multi-second hold — **whether running on battery alone or on USB power**. The firmware SHALL explicitly configure two AXP2101 power-key behaviours during boot, rather than relying on the M5Unified default, so a library change cannot silently break them, and SHALL log the configured register values over serial at boot for verification:
+On USB power, after a full AXP2101 hardware power-off, the device SHALL power back on from a **short press** of the physical power key. The firmware SHALL keep the AXP2101 power-key on-level (register 0x27, ONLEVEL field) pinned to a short press duration and log it over serial at boot, so a M5Unified library change cannot silently lengthen the required press.
 
-1. **Power-key on-level** (register 0x27, ONLEVEL field) set to a short press duration so a quick tap boots the device.
-2. **Battery-FET retention through power-off** (register 0x12, bit 3 `batfet_poweroff_enable`) enabled, so that on a battery-only power-off the battery FET stays closed and the battery remains connected to the system rail — otherwise the FET opens at power-off, the device goes fully dead, and only a USB VBUS-insert can restart it (observed defect, 2026-06-01).
+**Open hardware issue — power-on from battery alone (2026-06-01):** After a power-off while running on battery (USB disconnected), the device does NOT restart from a power-key press (short or long) — no backlight, no boot — and only a USB VBUS-insert revives it. This was investigated extensively:
+- The battery reads healthy (~4.16 V) via the AXP2101 ADC.
+- The stock factory firmware (`m5stack/CoreS3-UserDemo`) contains **no** power-on-from-battery code — its power path is `M5.begin()` only, with no BATFET (0x12) write. A healthy stock CoreS3 powers on from battery on that config alone.
+- An attempted firmware fix (setting reg 0x12 bit 3 `batfet_poweroff_enable`) did **not** resolve it and was reverted to match the stock config.
+
+Because the firmware now matches the proven stock power configuration and the symptom persists, the remaining suspects are **outside firmware**: the battery cell's ability to source start-up current, or the battery JST connector seating. This requires a hardware check, not a further register change.
 
 Rationale: this is a portable field recorder. Requiring a multi-second hold to power on (the observed pre-fix behaviour) makes the device feel dead in the hand and is unacceptable for field use.
 
-#### Scenario: Short press boots from hardware-off
-- **WHEN** the device has been powered off (battery present) and the user gives the power key a short tap
+#### Scenario: Short press boots from hardware-off (on USB)
+- **WHEN** the device is on USB power, has been powered off, and the user gives the power key a short tap
 - **THEN** the device boots to the recorder screen — no multi-second hold is required
 
-#### Scenario: Battery-only power-off and restart
-- **WHEN** the device is on battery only (USB disconnected) and is powered off, then the power key is tapped
-- **THEN** the battery FET remained connected through the power-off and the device powers back on from battery — it does NOT go permanently dead requiring a USB insert
+#### Scenario: Power-on from battery alone (OPEN — hardware suspected)
+- **WHEN** the device is on battery only (USB disconnected) and is powered off, then the power key is pressed
+- **THEN** (DESIRED) the device powers back on from battery. **(OBSERVED 2026-06-01: it does not — no backlight on any press; only a USB insert revives it. Firmware matches the stock power config that works on healthy units, so this is being treated as a battery-cell / connector hardware issue pending a physical check.)**
 
-#### Scenario: Power-key configuration is explicit and verifiable
+#### Scenario: Power-key on-level is explicit and verifiable
 - **WHEN** the device boots
-- **THEN** the firmware writes the AXP2101 power-key on-level (0x27 ONLEVEL) and the battery-FET-poweroff-retention bit (0x12 bit 3) to known values and logs the before/after register values over serial
+- **THEN** the firmware pins the AXP2101 power-key on-level (0x27 ONLEVEL) to a known value and logs it over serial
 
 #### Scenario: USB-insertion power-on remains a recovery path
 - **WHEN** the device is off and USB power is connected

@@ -143,21 +143,17 @@ void AppPowerModel::ConfigurePowerKey() {
                   "ONLEVEL=%s (tap-to-boot)\n",
                   before, after, kOnLevel[after & 0x03]);
 
-    // FR-PWRON (battery path): keep the battery FET connected through a power-off
-    // so the device can power back on from battery alone in the field. AXP2101
-    // reg 0x12 bit3 = "batfet_poweroff_enable" ("BATFET enable when POWEROFF and
-    // Battery only"). The CoreS3 default is 0 (M5.begin does not write 0x12), so
-    // at a battery-only power-off the FET OPENS, disconnecting the battery — the
-    // device goes fully dead and only a USB VBUS-insert can restart it (observed
-    // on the bench 2026-06-01). Setting bit3 keeps the FET closed through power-
-    // off so a power-key tap restarts from battery. Bit1 (OCP) left as-is.
-    // Source: AXP2101 datasheet reg 0x12 (BATFET control).
-    uint8_t bf_before = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x12, 100000L);
-    M5.In_I2C.bitOn(AXP2101_ADDR, 0x12, 0x08, 100000L);  // set bit3
-    uint8_t bf_after = M5.In_I2C.readRegister8(AXP2101_ADDR, 0x12, 100000L);
-    Serial.printf("[PWR] BATFET reg 0x12: before=0x%02X after=0x%02X  "
-                  "poweroff-batt-keep=%d\n",
-                  bf_before, bf_after, (bf_after >> 3) & 1);
+    // NOTE (2026-06-01): an earlier attempt set reg 0x12 bit3
+    // ("batfet_poweroff_enable") here to try to fix power-on-from-battery. It
+    // did NOT fix it and is a deviation from the stock M5 power config. The
+    // stock factory firmware (m5stack/CoreS3-UserDemo) does NOTHING to the AXP
+    // power path beyond M5.begin() — no 0x12 write — and a healthy CoreS3 powers
+    // on from battery on that config alone. So we match stock: no 0x12 write.
+    // 0x27 (ONLEVEL) is kept explicit above but is identical to the stock default
+    // (0x00), so it is a no-op against stock — retained only to pin the value
+    // against M5Unified version drift. The BATFET register is left to the PMU /
+    // M5.begin defaults. Battery-only power-on is being diagnosed as a
+    // hardware/battery-path question, not a firmware register tweak.
     Serial.flush();
 }
 
