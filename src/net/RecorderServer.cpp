@@ -94,6 +94,16 @@ void RecorderServer::loop() {
         // re-init mDNS + HTTP once association completes.
     }
 
+    // Maintain the un-acked recording count for the status-bar counter. Recompute
+    // only when flagged dirty (boot, and after each recording stops) — never on a
+    // timer — so the UI thread never scans the card. We're idle here (recording
+    // returns early above), so the SD bus is free; this also keeps the offline
+    // backlog count fresh even before WiFi is up.
+    if (pending_dirty_) {
+        recomputePending();
+        pending_dirty_ = false;
+    }
+
     bool connected = (WiFi.status() == WL_CONNECTED);
 
     // Bring up mDNS + HTTP once, the first time WiFi comes up. mDNS is torn down
@@ -118,8 +128,12 @@ void RecorderServer::loop() {
 
     // Push recordings to Headspace when idle — never mid-recording (WiFi is OFF
     // then anyway). One file per loop pass keeps handleClient() responsive.
+    // upload_pending forces an immediate cycle (post-record, resync); otherwise
+    // the periodic retry only fires when there's actually a backlog to clear, so
+    // an all-sent device never re-scans the card on the 30s tick.
     if (started && !recording &&
-        (upload_pending || (millis() - last_upload > UPLOAD_RETRY_MS))) {
+        (upload_pending ||
+         (pending_count_ > 0 && millis() - last_upload > UPLOAD_RETRY_MS))) {
         uploadCycle();
     }
 
@@ -150,6 +164,9 @@ void RecorderServer::routes() {
         }
         bool removed   = SD.remove(UPLOADED_MARKER);
         upload_pending = true;
+        pending_dirty_ = true;  // every recording is un-acked again — recount
+        burst_total_   = 0;     // start a fresh burst on the next cycle
+        burst_sent_    = 0;
         Serial.printf("[NET] resync: ack marker %s — re-pushing all recordings\n",
                       removed ? "cleared" : "absent");
         server.send(200, "application/json",
@@ -305,6 +322,41 @@ static long parse_bytes_written(const String& body) {
 // server stays responsive between uploads. Streams the WAV body straight off SD
 // (never buffered in RAM) and acks only on a 201 whose bytes_written matches the
 // bytes sent — a confirmed disk write, not "bytes received".
+// Count un-acked, non-empty recordings on the SD card. Called only when
+// pending_dirty_ is set (boot, recording stop, resync) — never on a timer — so
+// the cost stays off the UI refresh path.
+void RecorderServer::recomputePending() {
+    int n = 0;
+    File dir = SD.open("/");
+    if (dir) {
+        for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+            String base = basename_of(String(f.name()));
+            if (!f.isDirectory() && is_recording_file(base) && f.size() > 44 &&
+                !fileAcked(base)) {
+                n++;
+            }
+            f.close();
+        }
+        dir.close();
+    }
+    pending_count_ = n;
+}
+
+// In-memory snapshot for the status-bar counter (no SD access — safe to call
+// from the UI thread on every refresh).
+UploadStatus RecorderServer::uploadStatus() {
+    UploadStatus s;
+    s.pending = (pending_count_ < 0) ? 0 : pending_count_;
+    s.index   = burst_sent_ + 1;
+    s.total   = burst_total_;
+    uint32_t now = millis();
+    if (sending_now_)             s.state = 1;  // POST in flight
+    else if (now < done_until_)   s.state = 2;  // transient ✓ (all sent)
+    else if (now < failed_until_) s.state = 3;  // transient ⚠ (cycle failed)
+    else                          s.state = 0;  // idle (show backlog or nothing)
+    return s;
+}
+
 void RecorderServer::uploadCycle() {
     last_upload    = millis();
     upload_pending = false;
@@ -327,7 +379,18 @@ void RecorderServer::uploadCycle() {
         }
         dir.close();
     }
-    if (name.length() == 0) return;  // nothing un-acked
+    if (name.length() == 0) {  // nothing un-acked — burst complete/empty
+        burst_total_ = 0;
+        burst_sent_  = 0;
+        return;
+    }
+
+    // First file of a fresh burst: snapshot how many are queued so the counter
+    // can render "i/N" steadily across the whole burst.
+    if (burst_total_ == 0) {
+        burst_total_ = (pending_count_ > 0) ? pending_count_ : 1;
+        burst_sent_  = 0;
+    }
 
     String path = "/" + name;
     File file = SD.open(path, FILE_READ);
@@ -350,11 +413,11 @@ void RecorderServer::uploadCycle() {
     http.addHeader("X-Filename", name);
     http.addHeader("X-File-Size", String((uint32_t)fileSize));
 
-    // Surface the upload on the status bar before we block on the transfer. The
-    // POST holds the SPI bus and freezes the UI for the whole stream, so the
-    // loop's own 5s refresh can't paint this — SetUploading() forces an immediate
-    // paint+flush now, and clears it once the transfer returns.
-    Page::StatusBar::SetUploading(true);
+    // Surface "⬆ i/N" before we block on the transfer. The POST holds the SPI bus
+    // and freezes the UI for the whole stream, so PokeUpload() forces an immediate
+    // paint+flush now — the 5s refresh timer can't catch it.
+    sending_now_ = true;
+    Page::StatusBar::PokeUpload();
 
     // Stream the file body off SD. Hold the shared SPI-bus mutex across the whole
     // transfer so SD reads can't interleave with an LCD flush on the shared bus.
@@ -364,23 +427,37 @@ void RecorderServer::uploadCycle() {
     String resp = http.getString();
     http.end();
     file.close();
-
-    Page::StatusBar::SetUploading(false);
+    sending_now_ = false;
 
     if (code == 201) {
         long written = parse_bytes_written(resp);
         if (written == (long)fileSize) {
             ackFile(name);
-            Serial.printf("[NET] uploaded + acked %s (%u bytes)\n", name.c_str(),
-                          (uint32_t)fileSize);
-            upload_pending = true;  // immediately try the next un-acked file
+            if (pending_count_ > 0) pending_count_--;
+            burst_sent_++;
+            Serial.printf("[NET] uploaded + acked %s (%u bytes) [%d/%d]\n",
+                          name.c_str(), (uint32_t)fileSize, burst_sent_, burst_total_);
+            if (pending_count_ <= 0) {
+                // Whole backlog cleared — transient ✓, then the counter hides.
+                burst_total_ = 0;
+                burst_sent_  = 0;
+                done_until_  = millis() + 2000;
+                Page::StatusBar::PokeUpload(true);
+            } else {
+                upload_pending = true;  // immediately try the next un-acked file
+                Page::StatusBar::PokeUpload();
+            }
         } else {
             Serial.printf("[NET] upload %s: 201 but bytes_written=%ld != %u — not acked\n",
                           name.c_str(), written, (uint32_t)fileSize);
+            failed_until_ = millis() + 2000;
+            Page::StatusBar::PokeUpload(true);
         }
     } else {
         Serial.printf("[NET] upload %s failed, http=%d — retry next cycle\n",
                       name.c_str(), code);
+        failed_until_ = millis() + 2000;
+        Page::StatusBar::PokeUpload(true);
     }
 }
 

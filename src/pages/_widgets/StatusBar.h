@@ -20,30 +20,35 @@ class StatusBar {
     // per FR5). Default: false.
     void SetOnRecorderPage(bool on_recorder);
 
-    // Show/hide the upload glyph on the currently-mounted status bar. Static
-    // because it's driven from Net::Server.loop() (the upload path), not from a
-    // page. The upload POST blocks the loop with the screen frozen, so this
-    // paints + flushes the indicator synchronously rather than waiting for the
-    // 5s refresh timer. Safe to call from the main loop — same task as LVGL.
-    static void SetUploading(bool on);
+    // Repaint the upload counter on the currently-mounted status bar from the
+    // live Net::Server.uploadStatus() snapshot, and force an immediate flush.
+    // Static because it's driven from Net::Server.loop() (the upload path), not a
+    // page. The upload POST blocks the loop with the screen frozen, so the 5s
+    // refresh timer can't paint per-file progress — the upload path pokes us
+    // synchronously around each transfer. Pass schedule_clear=true when entering
+    // a transient (✓ done / ⚠ failed) state so a one-shot timer repaints it away
+    // after the hold window. Safe from the main loop — same task as LVGL.
+    static void PokeUpload(bool schedule_clear = false);
 
     static constexpr int HEIGHT_PX = 22;
 
    private:
     static void onTimer(lv_timer_t* t);
+    static void onTransientEnd(lv_timer_t* t);  // clears the ✓/⚠ hold
     void Refresh();
+    void ApplyUploadLabel();  // render upload counter from Net::Server snapshot
 
     lv_obj_t* root_ = nullptr;
     lv_obj_t* label_battery_ = nullptr;
     lv_obj_t* icon_charging_ = nullptr;
     lv_obj_t* icon_wifi_     = nullptr;
-    lv_obj_t* icon_upload_   = nullptr;
+    lv_obj_t* label_upload_  = nullptr;  // "⬆ N" / "⬆ i/N" / "✓" / "⚠ N"
     lv_obj_t* icon_rec_      = nullptr;
     lv_timer_t* timer_       = nullptr;
     AppPowerModel power_;  // local sampler (status bar is the consumer here)
     bool on_recorder_page_ = false;
 
-    // Points at the currently-attached status bar so the static SetUploading()
+    // Points at the currently-attached status bar so the static PokeUpload()
     // can reach the live instance. Set in Attach(), cleared in Detach().
     static StatusBar* s_active_;
 };
