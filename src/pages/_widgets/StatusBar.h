@@ -20,6 +20,13 @@ class StatusBar {
     // per FR5). Default: false.
     void SetOnRecorderPage(bool on_recorder);
 
+    // Show/hide the upload glyph on the currently-mounted status bar. Static
+    // because it's driven from Net::Server.loop() (the upload path), not from a
+    // page. The upload POST blocks the loop with the screen frozen, so this
+    // paints + flushes the indicator synchronously rather than waiting for the
+    // 5s refresh timer. Safe to call from the main loop — same task as LVGL.
+    static void SetUploading(bool on);
+
     static constexpr int HEIGHT_PX = 22;
 
    private:
@@ -30,10 +37,15 @@ class StatusBar {
     lv_obj_t* label_battery_ = nullptr;
     lv_obj_t* icon_charging_ = nullptr;
     lv_obj_t* icon_wifi_     = nullptr;
+    lv_obj_t* icon_upload_   = nullptr;
     lv_obj_t* icon_rec_      = nullptr;
     lv_timer_t* timer_       = nullptr;
     AppPowerModel power_;  // local sampler (status bar is the consumer here)
     bool on_recorder_page_ = false;
+
+    // Points at the currently-attached status bar so the static SetUploading()
+    // can reach the live instance. Set in Attach(), cleared in Detach().
+    static StatusBar* s_active_;
 };
 
 }  // namespace Page

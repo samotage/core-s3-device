@@ -5,6 +5,7 @@
 #include <ESPmDNS.h>
 #include <SD.h>
 #include "freertos/semphr.h"
+#include "../pages/_widgets/StatusBar.h"
 
 // Shared SPI-bus mutex (created in m5gfx_lvgl_init). The CoreS3 LCD and SD card
 // share the SPI bus, so every SD op (writer task, upload reads here) and every
@@ -349,6 +350,12 @@ void RecorderServer::uploadCycle() {
     http.addHeader("X-Filename", name);
     http.addHeader("X-File-Size", String((uint32_t)fileSize));
 
+    // Surface the upload on the status bar before we block on the transfer. The
+    // POST holds the SPI bus and freezes the UI for the whole stream, so the
+    // loop's own 5s refresh can't paint this — SetUploading() forces an immediate
+    // paint+flush now, and clears it once the transfer returns.
+    Page::StatusBar::SetUploading(true);
+
     // Stream the file body off SD. Hold the shared SPI-bus mutex across the whole
     // transfer so SD reads can't interleave with an LCD flush on the shared bus.
     bus_take();
@@ -357,6 +364,8 @@ void RecorderServer::uploadCycle() {
     String resp = http.getString();
     http.end();
     file.close();
+
+    Page::StatusBar::SetUploading(false);
 
     if (code == 201) {
         long written = parse_bytes_written(resp);
