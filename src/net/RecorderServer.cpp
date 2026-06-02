@@ -4,7 +4,9 @@
 #include <HTTPClient.h>
 #include <ESPmDNS.h>
 #include <SD.h>
+#include <WiFiClient.h>
 #include "freertos/semphr.h"
+#include "lvgl.h"
 #include "../pages/_widgets/StatusBar.h"
 
 // Shared SPI-bus mutex (created in m5gfx_lvgl_init). The CoreS3 LCD and SD card
@@ -130,10 +132,15 @@ void RecorderServer::loop() {
     // then anyway). One file per loop pass keeps handleClient() responsive.
     // upload_pending forces an immediate cycle (post-record, resync); otherwise
     // the periodic retry only fires when there's actually a backlog to clear, so
-    // an all-sent device never re-scans the card on the 30s tick.
+    // an all-sent device never re-scans the card on the 30s tick. After repeated
+    // failures (unreachable/stalled endpoint) back the retry off so a dead
+    // endpoint can't keep re-attempting — each attempt costs a short connect.
+    uint32_t retry_ms = UPLOAD_RETRY_MS;            // 30s default
+    if (fail_streak_ >= 4)      retry_ms = 300000UL;  // 5 min after sustained failure
+    else if (fail_streak_ >= 1) retry_ms = 60000UL;   // 1 min after a failure
     if (started && !recording &&
         (upload_pending ||
-         (pending_count_ > 0 && millis() - last_upload > UPLOAD_RETRY_MS))) {
+         (pending_count_ > 0 && millis() - last_upload > retry_ms))) {
         uploadCycle();
     }
 
@@ -357,6 +364,99 @@ UploadStatus RecorderServer::uploadStatus() {
     return s;
 }
 
+// Stream one WAV to the upload endpoint over a raw WiFiClient. The card is read
+// in small blocks (SPI bus held only per block) and LVGL is serviced between
+// blocks, so neither the bus nor the main loop is held for the whole transfer —
+// the screen and touch stay alive throughout. A short connect timeout and
+// bounded read/write waits mean an unreachable or stalled endpoint fast-fails
+// instead of freezing the UI (the bug the blocking HTTPClient.sendRequest had).
+int RecorderServer::postFileChunked(const String& name, fs::File& file, size_t fileSize,
+                                    long& out_written) {
+    out_written = -1;
+
+    // Parse upload_url ("http://HOST:PORT/PATH") into host / port / path.
+    String u = upload_url;
+    if (!u.startsWith("http://")) return -1;
+    u = u.substring(7);
+    int slash = u.indexOf('/');
+    String hostport = (slash >= 0) ? u.substring(0, slash) : u;
+    String path     = (slash >= 0) ? u.substring(slash)    : String("/");
+    uint16_t port = 80;
+    String host = hostport;
+    int colon = hostport.indexOf(':');
+    if (colon >= 0) {
+        host = hostport.substring(0, colon);
+        port = (uint16_t)hostport.substring(colon + 1).toInt();
+    }
+
+    WiFiClient client;
+    // Short connect timeout: an unreachable endpoint must not hang the UI.
+    if (!client.connect(host.c_str(), port, 2500)) return -1;
+
+    // Request line + headers with an explicit Content-Length (we stream the body
+    // ourselves below).
+    String hdr;
+    hdr  = "POST " + path + " HTTP/1.1\r\n";
+    hdr += "Host: " + host + ":" + String(port) + "\r\n";
+    hdr += "Content-Type: audio/wav\r\n";
+    hdr += "X-Device-Id: " + String(REC_HOSTNAME) + "\r\n";
+    hdr += "X-Filename: " + name + "\r\n";
+    hdr += "X-File-Size: " + String((uint32_t)fileSize) + "\r\n";
+    hdr += "Content-Length: " + String((uint32_t)fileSize) + "\r\n";
+    hdr += "Connection: close\r\n\r\n";
+    client.print(hdr);
+
+    // Body: SD-read -> socket-write, block by block, pumping LVGL each block so
+    // the UI never freezes mid-transfer.
+    static uint8_t buf[4096];
+    size_t remaining = fileSize;
+    while (remaining > 0) {
+        if (!client.connected()) { client.stop(); return -1; }
+        size_t want = (remaining < sizeof(buf)) ? remaining : sizeof(buf);
+        bus_take();
+        int r = file.read(buf, want);
+        bus_give();
+        if (r <= 0) { client.stop(); return -1; }
+
+        size_t sent = 0;
+        uint32_t wstart = millis();
+        while (sent < (size_t)r) {
+            size_t w = client.write(buf + sent, (size_t)r - sent);
+            if (w > 0) {
+                sent += w;
+                wstart = millis();
+            } else {
+                if (millis() - wstart > 8000) { client.stop(); return -1; }  // stalled
+                lv_timer_handler();  // keep the UI alive while the socket drains
+                delay(2);
+            }
+        }
+        remaining -= (size_t)r;
+        lv_timer_handler();          // service screen + touch between blocks
+    }
+
+    // Response: status line + small JSON body, bounded wait, UI pumped.
+    String resp;
+    uint32_t rstart = millis();
+    while (millis() - rstart < 8000) {
+        while (client.available()) {
+            resp += (char)client.read();
+            rstart = millis();
+        }
+        if (!client.connected() && !client.available()) break;
+        if (resp.length() > 3072) break;  // response is tiny; cap defensively
+        lv_timer_handler();
+        delay(2);
+    }
+    client.stop();
+
+    int status = -1;
+    int sp = resp.indexOf(' ');
+    if (sp >= 0 && (int)resp.length() >= sp + 4) status = resp.substring(sp + 1, sp + 4).toInt();
+    out_written = parse_bytes_written(resp);
+    return status;
+}
+
 void RecorderServer::uploadCycle() {
     last_upload    = millis();
     upload_pending = false;
@@ -400,62 +500,39 @@ void RecorderServer::uploadCycle() {
     }
     size_t fileSize = file.size();
 
-    HTTPClient http;
-    http.setConnectTimeout(5000);
-    http.setTimeout(20000);  // server confirms after the disk write completes
-    if (!http.begin(upload_url)) {
-        Serial.println("[NET] upload: begin failed");
-        file.close();
-        return;
-    }
-    http.addHeader("Content-Type", "audio/wav");
-    http.addHeader("X-Device-Id", REC_HOSTNAME);
-    http.addHeader("X-Filename", name);
-    http.addHeader("X-File-Size", String((uint32_t)fileSize));
-
-    // Surface "⬆ i/N" before we block on the transfer. The POST holds the SPI bus
-    // and freezes the UI for the whole stream, so PokeUpload() forces an immediate
-    // paint+flush now — the 5s refresh timer can't catch it.
+    // Surface "⬆ i/N" up front. The chunked sender below keeps the UI live the
+    // whole transfer, but paint progress immediately so it shows at once.
     sending_now_ = true;
     Page::StatusBar::PokeUpload();
 
-    // Stream the file body off SD. Hold the shared SPI-bus mutex across the whole
-    // transfer so SD reads can't interleave with an LCD flush on the shared bus.
-    bus_take();
-    int code = http.sendRequest("POST", &file, fileSize);
-    bus_give();
-    String resp = http.getString();
-    http.end();
+    long written = -1;
+    int code = postFileChunked(name, file, fileSize, written);
     file.close();
     sending_now_ = false;
 
-    if (code == 201) {
-        long written = parse_bytes_written(resp);
-        if (written == (long)fileSize) {
-            ackFile(name);
-            if (pending_count_ > 0) pending_count_--;
-            burst_sent_++;
-            Serial.printf("[NET] uploaded + acked %s (%u bytes) [%d/%d]\n",
-                          name.c_str(), (uint32_t)fileSize, burst_sent_, burst_total_);
-            if (pending_count_ <= 0) {
-                // Whole backlog cleared — transient ✓, then the counter hides.
-                burst_total_ = 0;
-                burst_sent_  = 0;
-                done_until_  = millis() + 2000;
-                Page::StatusBar::PokeUpload(true);
-            } else {
-                upload_pending = true;  // immediately try the next un-acked file
-                Page::StatusBar::PokeUpload();
-            }
-        } else {
-            Serial.printf("[NET] upload %s: 201 but bytes_written=%ld != %u — not acked\n",
-                          name.c_str(), written, (uint32_t)fileSize);
-            failed_until_ = millis() + 2000;
+    if (code == 201 && written == (long)fileSize) {
+        ackFile(name);
+        if (pending_count_ > 0) pending_count_--;
+        burst_sent_++;
+        fail_streak_ = 0;
+        Serial.printf("[NET] uploaded + acked %s (%u bytes) [%d/%d]\n",
+                      name.c_str(), (uint32_t)fileSize, burst_sent_, burst_total_);
+        if (pending_count_ <= 0) {
+            // Whole backlog cleared — transient ✓, then the counter hides.
+            burst_total_ = 0;
+            burst_sent_  = 0;
+            done_until_  = millis() + 2000;
             Page::StatusBar::PokeUpload(true);
+        } else {
+            upload_pending = true;  // immediately try the next un-acked file
+            Page::StatusBar::PokeUpload();
         }
     } else {
-        Serial.printf("[NET] upload %s failed, http=%d — retry next cycle\n",
-                      name.c_str(), code);
+        // Transport error, non-201, or a short write — leave un-acked, bump the
+        // failure streak (drives retry backoff in loop()), show the ⚠ transient.
+        fail_streak_++;
+        Serial.printf("[NET] upload %s failed (http=%d written=%ld) — backoff, retry later\n",
+                      name.c_str(), code, written);
         failed_until_ = millis() + 2000;
         Page::StatusBar::PokeUpload(true);
     }

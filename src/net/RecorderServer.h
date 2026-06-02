@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <WebServer.h>
 
+namespace fs { class File; }  // fwd-decl: postFileChunked takes a File& (defined in the .cpp via SD.h)
+
 namespace Net {
 
 // Snapshot of upload progress for the status bar. state: 0 idle, 1 sending,
@@ -55,6 +57,7 @@ class RecorderServer {
     int  burst_total_    = 0;     // files to send in the current push burst (the N)
     int  burst_sent_     = 0;     // files acked so far in the current burst
     bool sending_now_    = false; // a POST is in flight right now
+    int  fail_streak_    = 0;     // consecutive failed cycles -> retry backoff
     uint32_t done_until_   = 0;   // millis() until which the ✓ "all sent" holds
     uint32_t failed_until_ = 0;   // millis() until which the ⚠ failed holds
 
@@ -65,6 +68,11 @@ class RecorderServer {
 
     void resolveUploadUrl();             // mDNS browse -> upload_url, else fallback
     void uploadCycle();                  // push un-acked recordings (one per call)
+    // Stream one file to the upload endpoint over a raw socket, reading the card
+    // in small blocks and servicing LVGL between blocks so the UI never freezes
+    // mid-transfer. Returns the HTTP status (<0 on transport error); sets
+    // out_written from the 201 JSON body.
+    int  postFileChunked(const String& name, fs::File& file, size_t fileSize, long& out_written);
     void recomputePending();             // SD scan -> pending_count_
     bool fileAcked(const String& name);  // is name in the SD uploaded-marker?
     void ackFile(const String& name);    // append name to the marker
