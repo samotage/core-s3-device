@@ -65,6 +65,7 @@ class RecorderServer {
     void handleList();
     void handleDownload();
     void handleRoot();
+    void handleDiag();   // boot summary + /DIAG.log over the LAN (no serial needed)
 
     void resolveUploadUrl();             // mDNS browse -> upload_url, else fallback
     void uploadCycle();                  // push un-acked recordings (one per call)

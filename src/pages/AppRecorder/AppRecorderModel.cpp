@@ -1,5 +1,6 @@
 #include "AppRecorderModel.h"
 #include "M5Unified.h"
+#include "../../diag/CrashLog.h"
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include "freertos/semphr.h"
@@ -216,6 +217,10 @@ bool AppRecorderModel::StartRecording() {
         SetFault("writer task failed");
         return false;
     }
+
+    // Arm the black box. If the device dies from here on, the next boot reads
+    // this block back and logs how far we got + why we reset.
+    Diag::MarkRecordingStart(last_filename);
     return true;
 }
 
@@ -238,6 +243,11 @@ void AppRecorderModel::StopRecording() {
     level          = 0;
     stop_requested = false;
     file_num++;
+
+    // Disarm the black box: this stop was deliberate, so the next boot must not
+    // report it as a death. Anything that kills us without reaching here leaves
+    // was_recording set — which is exactly the signal we want.
+    Diag::MarkRecordingStop();
 }
 
 // --- capture (core 1, LVGL timer) -------------------------------------------

@@ -1,6 +1,7 @@
 #include "AppRecorder.h"
 #include "../AppPower/AppPowerModel.h"
 #include "../../net/RecorderServer.h"
+#include "../../diag/CrashLog.h"
 #include <SD.h>
 
 using namespace Page;
@@ -185,6 +186,10 @@ void AppRecorder::Update() {
     if (sec != last_sec) {
         last_sec = sec;
         View.SetRecording(sec);
+        // Mirror progress + heap into RTC no-init RAM (~1 Hz). Survives a panic /
+        // watchdog / brownout reset, so the next boot can say exactly how far this
+        // recording got and what the heap looked like on the way down.
+        Diag::Tick(sec * (REC_SAMPLE_RATE * 2), sec);
     }
 }
 

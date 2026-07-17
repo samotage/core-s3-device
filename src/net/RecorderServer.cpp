@@ -8,6 +8,7 @@
 #include "freertos/semphr.h"
 #include "lvgl.h"
 #include "../pages/_widgets/StatusBar.h"
+#include "../diag/CrashLog.h"
 
 // Shared SPI-bus mutex (created in m5gfx_lvgl_init). The CoreS3 LCD and SD card
 // share the SPI bus, so every SD op (writer task, upload reads here) and every
@@ -160,6 +161,10 @@ String RecorderServer::hostUrl() { return String("http://") + REC_HOSTNAME + ".l
 void RecorderServer::routes() {
     server.on("/", HTTP_GET, [this]() { handleRoot(); });
     server.on("/api/recordings", HTTP_GET, [this]() { handleList(); });
+    // Black box: this boot's summary + the persisted /DIAG.log. Readable over the
+    // LAN so a mid-meeting restart can be diagnosed without a serial cable — the
+    // exact gap that left the 2026-07-17 REC_032/033 cut-offs unexplained.
+    server.on("/api/diag", HTTP_GET, [this]() { handleDiag(); });
     // Operational: clear the sent-tracking marker and force a re-push of every
     // recording on the next idle pass. Lets the upload path be re-driven without
     // a physical re-record (USB serial control is unavailable — Serial is on UART0
@@ -255,7 +260,32 @@ void RecorderServer::handleRoot() {
     server.send(200, "text/plain",
                 "otageLabs CoreS3 meeting recorder\n"
                 "GET /api/recordings   list recordings (JSON)\n"
-                "GET /rec/<name>       download a WAV\n");
+                "GET /rec/<name>       download a WAV\n"
+                "GET /api/diag         boot/crash log (why the last recording stopped)\n");
+}
+
+// Black box readout. Returns this boot's summary followed by the full persisted
+// /DIAG.log, newest boot last. Refused while recording (the card is the writer's).
+void RecorderServer::handleDiag() {
+    if (recording) {
+        server.send(503, "application/json", "{\"error\":\"recording\"}");
+        return;
+    }
+    String out = "== this boot ==\n";
+    out += Diag::BootSummary();
+    out += "\n\n== " DIAG_LOG_PATH " ==\n";
+
+    bus_take();
+    File f = SD.open(DIAG_LOG_PATH, FILE_READ);
+    if (f) {
+        while (f.available()) out += (char)f.read();
+        f.close();
+    } else {
+        out += "(no log on card yet)\n";
+    }
+    bus_give();
+
+    server.send(200, "text/plain", out);
 }
 
 bool RecorderServer::fileAcked(const String& name) {

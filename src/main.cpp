@@ -13,6 +13,7 @@
 
 #include "App.h"
 #include "net/RecorderServer.h"
+#include "diag/CrashLog.h"
 #include "pages/AppSettings/AppSettings.h"
 #include "pages/AppPower/AppPowerModel.h"
 
@@ -27,6 +28,11 @@ void setup() {
     Serial.begin(115200);   // was 15200 (typo); USB-CDC ignores it but it matters for non-CDC builds
     delay(1500);            // let USB-CDC enumerate so the next few prints actually emit
     Serial.println("[BOOT] setup() entered"); Serial.flush();
+
+    // Black box FIRST: capture esp_reset_reason() and the previous boot's RTC
+    // block before any other init can disturb them. This is what tells us whether
+    // a severed recording was a crash, a watchdog, a brownout, or a power-off.
+    Diag::Begin();
 
     M5.begin();
     Serial.println("[BOOT] M5.begin() ok"); Serial.flush();
@@ -88,6 +94,10 @@ void setup() {
     App_Init();
     Serial.println("[BOOT] App_Init() done"); Serial.flush();
 
+    // App_Init loads the recorder page, which mounts the card, so the boot record
+    // can land now. No-ops (and is retried from the loop) if the card isn't up.
+    Diag::FlushToSD();
+
     // WiFi file server so a Headspace agent can pull recordings (no-op offline).
     Net::Server.begin();
     Serial.println("[BOOT] Net::Server.begin() done"); Serial.flush();
@@ -97,5 +107,11 @@ void loop() {
 
     lv_timer_handler();
     Net::Server.loop();
+
+    // Retry the boot record until the card is mounted (writes at most once per
+    // boot). Cheap: returns immediately once written. Never runs during a capture
+    // because a capture can only start after the card mounts.
+    Diag::FlushToSD();
+
     delay(10);
 }
