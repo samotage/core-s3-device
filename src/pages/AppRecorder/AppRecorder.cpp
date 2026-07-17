@@ -7,7 +7,7 @@
 using namespace Page;
 
 AppRecorder::AppRecorder()
-    : timer(nullptr), last_sec(0), last_storage_full(false) {}
+    : timer(nullptr), last_sec(0), last_storage_full(false), auto_stop_at_ms(0) {}
 
 AppRecorder::~AppRecorder() {}
 
@@ -132,6 +132,7 @@ void AppRecorder::Update() {
     // and shows a visible, sticky error — never a silent stop. Sticky until the
     // user taps Record again (StartRecording clears the fault).
     if (Model()->HasFault()) {
+        auto_stop_at_ms = 0;   // a fault ends the capture; the deadline is moot
         if (Model()->IsRecording()) {
             Model()->StopRecording();   // runs the drain/finalise handshake
             Net::Server.setRecording(false);
@@ -142,6 +143,28 @@ void AppRecorder::Update() {
     }
 
     if (!Model()->IsRecording()) {
+        // Test/ops: a remote POST /api/record?secs=N starts a fixed-duration
+        // capture here. Consumed only while idle, and only after the request has
+        // aged enough for its HTTP 200 to drain (the radio dies once we start).
+        uint32_t req_secs = 0;
+        if (Net::Server.consumeRecordRequest(req_secs)) {
+            if (StorageFull()) {
+                View.SetStorageFull();
+            } else {
+                last_sec = 0;
+                if (Model()->StartRecording()) {
+                    auto_stop_at_ms = millis() + req_secs * 1000UL;
+                    Net::Server.setRecording(true);
+                    View.SetRecording(0);
+                    Serial.printf("[REC] remote capture started — auto-stop in %us\n",
+                                  (unsigned)req_secs);
+                } else {
+                    View.SetError(Model()->HasFault() ? Model()->FaultMsg() : "SD card error");
+                }
+            }
+            return;
+        }
+
         // FR33: re-check storage-full when idle (covers files deleted via the
         // Files page). Throttled to ~1 Hz — SD.totalBytes/usedBytes walk the FAT.
         static uint32_t last_storage_check_ms = 0;
@@ -163,6 +186,18 @@ void AppRecorder::Update() {
     // Recording: pull a mic chunk into the PSRAM ring (the core-0 writer task
     // drains it to SD). This never blocks on SD or the bus.
     Model()->CaptureChunk();
+
+    // Remote fixed-duration capture: stop ourselves at the deadline. The radio is
+    // off, so nothing can tell us to stop — this is the only way out.
+    if (auto_stop_at_ms && (int32_t)(millis() - auto_stop_at_ms) >= 0) {
+        auto_stop_at_ms = 0;
+        Model()->StopRecording();
+        Net::Server.setRecording(false);
+        Net::Server.requestUpload();
+        View.SetSaved(Model()->LastFilename(), last_sec);
+        Serial.println("[REC] remote capture hit its deadline — stopped");
+        return;
+    }
 
     // FR30-FR32: critical-battery auto-save during recording. StopRecording runs
     // the writer drain/finalise handshake before power-off (no corrupt file).
@@ -217,6 +252,7 @@ void AppRecorder::onEvent(lv_event_t* event) {
     if (obj == instance->View.ui.btn_record) {
         if (!instance->Model()) return;
         if (instance->Model()->IsRecording()) {
+            instance->auto_stop_at_ms = 0;   // a manual stop cancels any remote deadline
             instance->Model()->StopRecording();
             Net::Server.setRecording(false);
             Net::Server.requestUpload();

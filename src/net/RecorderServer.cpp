@@ -154,6 +154,16 @@ void RecorderServer::loop() {
     }
 }
 
+bool RecorderServer::consumeRecordRequest(uint32_t& secs) {
+    if (record_req_secs_ == 0) return false;
+    // Hold ~500 ms so the HTTP 200 actually drains: starting the capture powers
+    // the radio down, and an un-flushed response would never reach the client.
+    if (millis() - record_req_at_ms_ < 500) return false;
+    secs             = record_req_secs_;
+    record_req_secs_ = 0;
+    return true;
+}
+
 bool RecorderServer::wifiConnected() { return WiFi.status() == WL_CONNECTED; }
 
 String RecorderServer::hostUrl() { return String("http://") + REC_HOSTNAME + ".local"; }
@@ -165,6 +175,23 @@ void RecorderServer::routes() {
     // LAN so a mid-meeting restart can be diagnosed without a serial cable — the
     // exact gap that left the 2026-07-17 REC_032/033 cut-offs unexplained.
     server.on("/api/diag", HTTP_GET, [this]() { handleDiag(); });
+    // Test/ops: POST /api/record?secs=N — start a fixed-duration capture that
+    // auto-stops. The radio dies for the duration, so N is committed up front.
+    server.on("/api/record", HTTP_POST, [this]() {
+        if (recording) {
+            server.send(503, "application/json", "{\"error\":\"recording\"}");
+            return;
+        }
+        long secs = server.hasArg("secs") ? server.arg("secs").toInt() : 60;
+        if (secs < 5)    secs = 5;
+        if (secs > 7200) secs = 7200;   // 2 h ceiling — a runaway soak is not a feature
+        record_req_secs_  = (uint32_t)secs;
+        record_req_at_ms_ = millis();
+        Serial.printf("[NET] remote record request: %lds\n", secs);
+        server.send(200, "application/json",
+                    String("{\"status\":\"starting\",\"secs\":") + String(secs) +
+                        ",\"note\":\"wifi off until it stops\"}");
+    });
     // Operational: clear the sent-tracking marker and force a re-push of every
     // recording on the next idle pass. Lets the upload path be re-driven without
     // a physical re-record (USB serial control is unavailable — Serial is on UART0

@@ -36,6 +36,19 @@ class RecorderServer {
     // pending count for recompute on the next idle pass.
     void setRecording(bool r) { recording = r; if (!r) pending_dirty_ = true; }
     void requestUpload() { upload_pending = true; }  // run upload cycle asap (when idle)
+
+    // Test/ops harness: start a FIXED-DURATION recording remotely.
+    //
+    // The duration is set up front and cannot be changed later, because the radio
+    // is powered down for the whole capture (see loop()) — once recording starts
+    // the device is unreachable until it stops itself. This is the only way to
+    // drive a hands-off soak: app Serial lives on UART0 (ARDUINO_USB_CDC_ON_BOOT
+    // was dropped in 4f148f3 to fix battery cold-start), so the r/s serial
+    // controls are not reachable over USB.
+    //
+    // Returns true once, handing the caller the requested duration; AppRecorder
+    // consumes it and owns the auto-stop deadline.
+    bool consumeRecordRequest(uint32_t& secs);
     bool wifiConnected();
     String hostUrl();             // "http://core-s3.local"
     UploadStatus uploadStatus();  // snapshot for the status bar counter
@@ -49,6 +62,11 @@ class RecorderServer {
     uint32_t last_retry  = 0;
     uint32_t last_upload = 0;
     String upload_url;            // resolved upload endpoint (mDNS or fallback)
+
+    // Pending remote record request (see consumeRecordRequest). Armed with a short
+    // delay so the HTTP 200 drains before the capture starts and kills the radio.
+    uint32_t record_req_secs_  = 0;
+    uint32_t record_req_at_ms_ = 0;
 
     // Upload-counter state (status bar). pending_count_ is maintained in memory
     // (recomputed by SD scan only when dirty) so the UI never scans the card.

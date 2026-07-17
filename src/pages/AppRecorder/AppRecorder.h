@@ -37,6 +37,9 @@ class AppRecorder : public PageBase {
     lv_timer_t* timer;
     uint32_t last_sec;
     bool last_storage_full;
+    // Deadline (millis) for a remotely-requested fixed-duration capture; 0 = the
+    // capture is user-driven and runs until the button is pressed.
+    uint32_t auto_stop_at_ms;
 };
 
 }  // namespace Page
