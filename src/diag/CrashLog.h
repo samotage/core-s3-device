@@ -41,6 +41,13 @@ struct RecState {
     uint32_t largest_block;  // largest free internal block (fragmentation probe)
     uint32_t free_psram;
     uint32_t min_free_ever;  // low-water mark of free_internal across the capture
+    // Power, sampled ~5 s. min_vbat_mv is the point of this: if a capture dies
+    // from a supply dip, the low-water mark is the evidence — and it settles
+    // whether the device was on USB or battery at the time, by measurement
+    // rather than recollection.
+    uint32_t vbat_mv;
+    uint32_t min_vbat_mv;
+    uint32_t charging;       // AxpBatIsCharging(): 0 none, 1 charging, 2 discharging
 };
 
 // Read the reset reason and the previous boot's block. Call FIRST in setup(),
@@ -53,6 +60,9 @@ void FlushToSD();
 
 void MarkRecordingStart(const char* filename);
 void Tick(uint32_t bytes_written, uint32_t secs);  // ~1 Hz from the capture path
+// ~5 Hz-of-a-minute (every 5 s) from the capture path's existing battery poll.
+// Kept separate from Tick so the 1 Hz path never pays for an I2C read.
+void TickPower(uint16_t vbat_mv, uint8_t charging);
 void MarkRecordingStop();                          // clean stop — clears was_recording
 
 // One-line summary of THIS boot ("BOOT #12 reason=PANIC | DIED MID-RECORDING ...").

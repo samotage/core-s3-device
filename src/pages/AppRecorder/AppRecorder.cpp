@@ -206,6 +206,10 @@ void AppRecorder::Update() {
     if (now - last_batt_check >= 5000) {
         last_batt_check = now;
         AppPowerModel pm;
+        // Record supply state into the black box on the poll we already do here,
+        // so the capture path pays for no extra I2C. min_vbat across the capture
+        // is what would expose a supply dip behind a restart.
+        Diag::TickPower(pm.SampleBatteryMv(), pm.AxpBatIsCharging());
         if (pm.IsCriticalBattery()) {
             Serial.println("[REC] CRITICAL BATTERY — auto-save + shutdown");
             Model()->StopRecording();

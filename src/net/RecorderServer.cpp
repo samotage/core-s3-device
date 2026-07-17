@@ -9,6 +9,7 @@
 #include "lvgl.h"
 #include "../pages/_widgets/StatusBar.h"
 #include "../diag/CrashLog.h"
+#include "../pages/AppPower/AppPowerModel.h"
 
 // Shared SPI-bus mutex (created in m5gfx_lvgl_init). The CoreS3 LCD and SD card
 // share the SPI bus, so every SD op (writer task, upload reads here) and every
@@ -300,7 +301,20 @@ void RecorderServer::handleDiag() {
     }
     String out = "== this boot ==\n";
     out += Diag::BootSummary();
-    out += "\n\n== " DIAG_LOG_PATH " ==\n";
+
+    // Live supply state, measured now. Settles "was it on USB or battery?" without
+    // anyone having to remember: charging=1 means VBUS is feeding it.
+    {
+        Page::AppPowerModel pm;
+        uint16_t mv  = pm.SampleBatteryMv();
+        uint8_t  chg = pm.AxpBatIsCharging();
+        out += "\n\n== live power ==\n";
+        out += "vbat=" + String(mv) + "mV pct=" +
+               String(mv ? Page::AppPowerModel::BatteryPercentFromMv(mv) : 0) +
+               "% charging=" + String(chg) + "  (0=none 1=charging 2=discharging)\n";
+    }
+
+    out += "\n== " DIAG_LOG_PATH " ==\n";
 
     bus_take();
     File f = SD.open(DIAG_LOG_PATH, FILE_READ);

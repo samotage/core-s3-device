@@ -74,13 +74,17 @@ void Begin() {
     if (s_prev_valid && s_prev.was_recording) {
         snprintf(s_summary, sizeof(s_summary),
                  "BOOT #%lu reason=%s | DIED MID-RECORDING %s bytes=%lu secs=%lu "
-                 "uptime=%lums heap_int=%lu largest=%lu psram=%lu min_free=%lu",
+                 "uptime=%lums heap_int=%lu largest=%lu psram=%lu min_free=%lu "
+                 "vbat=%lumV min_vbat=%lumV chg=%lu",
                  (unsigned long)next_boot, reason_str(s_reason),
                  s_prev.filename[0] ? s_prev.filename : "?",
                  (unsigned long)s_prev.rec_bytes, (unsigned long)s_prev.rec_secs,
                  (unsigned long)s_prev.uptime_ms, (unsigned long)s_prev.free_internal,
                  (unsigned long)s_prev.largest_block, (unsigned long)s_prev.free_psram,
-                 (unsigned long)s_prev.min_free_ever);
+                 (unsigned long)s_prev.min_free_ever,
+                 (unsigned long)s_prev.vbat_mv,
+                 (unsigned long)(s_prev.min_vbat_mv == 0xFFFFFFFFUL ? 0 : s_prev.min_vbat_mv),
+                 (unsigned long)s_prev.charging);
     } else if (s_prev_valid) {
         snprintf(s_summary, sizeof(s_summary),
                  "BOOT #%lu reason=%s | clean (no capture in progress at last reset)",
@@ -135,7 +139,17 @@ void MarkRecordingStart(const char* filename) {
     s_state.rec_secs      = 0;
     s_state.uptime_ms     = millis();
     s_state.min_free_ever = 0xFFFFFFFFUL;
+    s_state.min_vbat_mv   = 0xFFFFFFFFUL;
     s_state.was_recording = 1;   // set LAST: the flag is what makes the block meaningful
+}
+
+void TickPower(uint16_t vbat_mv, uint8_t charging) {
+    if (!s_state.was_recording) return;
+    s_state.vbat_mv  = vbat_mv;
+    s_state.charging = charging;
+    // Only track the low-water mark for real readings — a failed I2C read returns
+    // 0 and would otherwise poison the minimum with a fake brownout.
+    if (vbat_mv > 0 && vbat_mv < s_state.min_vbat_mv) s_state.min_vbat_mv = vbat_mv;
 }
 
 void Tick(uint32_t bytes_written, uint32_t secs) {
