@@ -117,6 +117,12 @@ void AppRecorderView::SetIdle() {
     lv_label_set_text(ui.label_status, "");
 }
 
+// Full recording-state entry: button -> red "Stop", reveal the bar + timer, seed
+// the elapsed label. Call this ONCE on the idle->recording transition (and to
+// restore the view on page nav mid-recording) — NOT every second. The per-second
+// tick uses SetTimer() so the static visuals aren't re-set 16k+ times over a long
+// capture, which needlessly churned the 48 KB LVGL pool (leading PANIC suspect,
+// #1679).
 void AppRecorderView::SetRecording(uint32_t seconds) {
     lv_obj_set_style_bg_color(ui.btn_record, COL_RED, 0);
     lv_label_set_text(ui.label_btn, "Stop");
@@ -125,6 +131,14 @@ void AppRecorderView::SetRecording(uint32_t seconds) {
     lv_obj_clear_flag(ui.label_timer, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text_fmt(ui.label_timer, "%02u:%02u", seconds / 60, seconds % 60);
     lv_label_set_text(ui.label_status, "");
+}
+
+// Per-second hot path: update ONLY the elapsed-time label. Everything else was
+// already set by SetRecording() when the capture began. Keeping this to a single
+// small label realloc per second (vs re-setting colours/text/flags every tick)
+// is the LVGL-pool-pressure mitigation for the long-recording PANIC (#1679).
+void AppRecorderView::SetTimer(uint32_t seconds) {
+    lv_label_set_text_fmt(ui.label_timer, "%02u:%02u", seconds / 60, seconds % 60);
 }
 
 void AppRecorderView::SetSaved(const char* filename, uint32_t seconds) {

@@ -142,6 +142,18 @@ void AppRecorderModel::WriterLoop() {
                 break;
             }
             bytes_written += w;
+
+            // uint32 WAV-header guard (#1679). REC_MAX_SECONDS caps duration long
+            // before this, but never let bytes_written run past the point where the
+            // uint32 size fields would overflow — fault-stop and finalise cleanly
+            // instead of writing a corrupt header.
+            if (bytes_written >= REC_WAV_MAX_BYTES) {
+                Serial.printf("[REC] WAV size ceiling reached at %lu bytes — STOP\n",
+                              (unsigned long)bytes_written);
+                Serial.flush();
+                SetFault("Max file size - saved");
+                break;
+            }
         }
 
         uint32_t now = millis();

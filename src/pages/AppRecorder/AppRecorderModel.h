@@ -21,6 +21,13 @@
 #define REC_RING_BYTES   (1024UL * 1024UL)  // 1 MB PSRAM ≈ 30 s @ 32 KB/s (D1)
 #define REC_WRITE_BLOCK  (32UL * 1024UL)     // 32 KB drain block (D2)
 
+// WAV size ceiling. The RIFF `file_size`/`data_size` header fields are uint32,
+// so a capture past ~4 GB overflows them and corrupts the header. REC_MAX_SECONDS
+// stops us long before this (2 h ≈ 230 MB), but the writer guards the invariant
+// directly — fault-stop cleanly rather than ever write a corrupt header. ~100 MB
+// margin below UINT32_MAX leaves room for the 44-byte header + a final block.
+#define REC_WAV_MAX_BYTES (4000UL * 1024UL * 1024UL)   // 4000 MiB < 4 GiB uint32 limit
+
 namespace Page {
 
 // Canonical 44-byte PCM WAV header. Written once with zeroed sizes on start,

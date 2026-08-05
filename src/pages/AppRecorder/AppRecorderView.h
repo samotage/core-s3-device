@@ -12,7 +12,8 @@ class AppRecorderView {
     void Delete();
 
     void SetIdle();
-    void SetRecording(uint32_t seconds);
+    void SetRecording(uint32_t seconds);  // full state entry — call ONCE on start
+    void SetTimer(uint32_t seconds);       // per-second hot path — timer label only
     void SetSaved(const char* filename, uint32_t seconds);
     void SetError(const char* msg);
     void SetStorageFull();

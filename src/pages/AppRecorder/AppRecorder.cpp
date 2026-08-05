@@ -187,6 +187,26 @@ void AppRecorder::Update() {
     // drains it to SD). This never blocks on SD or the bus.
     Model()->CaptureChunk();
 
+    // SAFETY CAP (#1679): hard maximum recording duration. A "forgot to stop"
+    // runaway reached 4.5 h — 3.4x past the ~79 min the device had ever been
+    // tested to — and PANIC'd. Auto-save well before that untested territory via
+    // the normal clean drain/finalise path (no audio lost). Applies to EVERY
+    // recording, unlike auto_stop_at_ms which only bounds remote fixed-duration
+    // captures. Uses seconds derived from bytes actually persisted (FR19).
+    uint32_t rec_secs = Model()->RecordingSeconds();
+    if (rec_secs >= REC_MAX_SECONDS) {
+        auto_stop_at_ms = 0;   // a safety stop cancels any remote deadline too
+        Model()->StopRecording();
+        Net::Server.setRecording(false);
+        Net::Server.requestUpload();
+        View.SetSaved(Model()->LastFilename(), rec_secs);
+        last_sec = 0;
+        Serial.printf("[REC] SAFETY: max duration %us reached — auto-saved %s\n",
+                      (unsigned)REC_MAX_SECONDS, Model()->LastFilename());
+        Serial.flush();
+        return;
+    }
+
     // Remote fixed-duration capture: stop ourselves at the deadline. The radio is
     // off, so nothing can tell us to stop — this is the only way out.
     if (auto_stop_at_ms && (int32_t)(millis() - auto_stop_at_ms) >= 0) {
@@ -224,7 +244,7 @@ void AppRecorder::Update() {
     uint32_t sec = Model()->RecordingSeconds();
     if (sec != last_sec) {
         last_sec = sec;
-        View.SetRecording(sec);
+        View.SetTimer(sec);   // timer-label only — static visuals set once on start (#1679)
         // Mirror progress + heap into RTC no-init RAM (~1 Hz). Survives a panic /
         // watchdog / brownout reset, so the next boot can say exactly how far this
         // recording got and what the heap looked like on the way down.

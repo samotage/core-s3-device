@@ -55,4 +55,12 @@
 // Default brightness on boot (Settings page overrides at runtime).
 #define DEFAULT_BRIGHTNESS 180
 
+// Maximum recording duration — hard safety cap (#1679). Until 2026-08-04 the
+// device had never recorded past ~79 min; a "forgot to stop" 4.5 h runaway then
+// hit a firmware PANIC. This ceiling auto-saves long before that untested
+// territory via the normal clean drain/finalise path (no audio lost). It sits
+// far above any real meeting yet well below the observed 4.5 h failure. A soak
+// test that legitimately needs to exceed it must raise this define.
+#define REC_MAX_SECONDS 7200   // 2 h
+
 #endif  // __CONFIG_H
