@@ -138,8 +138,10 @@ void RecorderServer::loop() {
     // failures (unreachable/stalled endpoint) back the retry off so a dead
     // endpoint can't keep re-attempting — each attempt costs a short connect.
     uint32_t retry_ms = UPLOAD_RETRY_MS;            // 30s default
-    if (fail_streak_ >= 4)      retry_ms = 300000UL;  // 5 min after sustained failure
-    else if (fail_streak_ >= 1) retry_ms = 60000UL;   // 1 min after a failure
+    // On failure, keep retrying every 60s indefinitely (each retry re-browses
+    // mDNS above) so a device that arrives home recovers within a minute. No
+    // 5-min give-up: a pending file must land eventually, not sit for hours.
+    if (fail_streak_ >= 1) retry_ms = 60000UL;      // 1 min after any failure
     if (started && !recording &&
         (upload_pending ||
          (pending_count_ > 0 && millis() - last_upload > retry_ms))) {
@@ -531,7 +533,20 @@ int RecorderServer::postFileChunked(const String& name, fs::File& file, size_t f
 void RecorderServer::uploadCycle() {
     last_upload    = millis();
     upload_pending = false;
-    if (upload_url.length() == 0) return;  // no endpoint resolved
+
+    // Re-browse for the Headspace endpoint whenever we have work and either don't
+    // know it yet or the last push failed. The laptop's IP changes as it moves
+    // between the phone hotspot (on the road) and the home network, but the device
+    // stays associated to home WiFi the whole time — so the one-shot resolve at
+    // WiFi-up (loop()) never re-runs and upload_url goes stale, pushing to a dead
+    // address forever (the 120-min Friday file that never landed). A fresh mDNS
+    // browse here means a device that arrives home re-finds the laptop on the next
+    // retry. Only re-resolve on failure/empty so a healthy URL (fail_streak_==0) is
+    // never disturbed by a transient mDNS miss. Cheap: runs only with a backlog.
+    if (upload_url.length() == 0 || fail_streak_ > 0) {
+        resolveUploadUrl();
+    }
+    if (upload_url.length() == 0) return;  // still no endpoint — retry next cycle
 
     // Find the first un-acked, non-empty recording (oldest-first by directory
     // order). One per cycle; the rest follow on subsequent ticks.
