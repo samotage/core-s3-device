@@ -18,7 +18,6 @@ The URL says "kit", but confirm that the cart line reads **K145**.
 | 1 | **USB-C power supply, 5 V / 3 A or better, plus a 2 m USB-C cable** (a right-angle plug is neater on a bench) | A kitchen terminal runs on mains full time. The battery only charges while the device is **powered on and initialised**. The docs don't give the USB-C PD input spec, so a plain 5 V/3 A supply is the safe choice. |
 | 2 | **Mount for the 1/4"-20 tripod thread** (side nut): a mini tabletop tripod, or a 1/4" magnetic or adhesive wall mount for the fridge or splashback | This is the only mounting point. There is no VESA mount or kickstand. |
 | 3 | **microSD card** (16–32 GB, a known brand) | Local storage for logs, audio buffers and assets. |
-| 4 | **NP-F550 external charger + 1 spare NP-F550** *(only if you'll carry it around the house)* | Lets you charge a battery without the tablet running. Batteries drained below 6 V go into protection mode and need a remove/reset/reinstall to recover. Buy a reputable brand, because NP-F clones are often under-rated. |
 
 ## Optional, later
 
