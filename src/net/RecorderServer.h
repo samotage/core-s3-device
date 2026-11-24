@@ -50,6 +50,7 @@ class RecorderServer {
     // consumes it and owns the auto-stop deadline.
     bool consumeRecordRequest(uint32_t& secs);
     bool wifiConnected();
+    String netName();             // SSID currently associated ("" when not)
     String hostUrl();             // "http://core-s3.local"
     UploadStatus uploadStatus();  // snapshot for the status bar counter
 
@@ -59,7 +60,12 @@ class RecorderServer {
     bool started        = false;  // mDNS + HTTP started (once, on first connect)
     bool upload_pending = false;  // run an upload cycle as soon as idle
     bool was_paused     = false;  // tracks the "paused during recording" state
-    uint32_t last_retry  = 0;
+    bool routes_registered_ = false;  // HTTP handlers added (once per boot)
+    bool was_connected_  = false; // last loop saw WL_CONNECTED (edge-detects a drop)
+    // Multi-network (#4309): index into the priority-ordered list (home, hotspot)
+    // and when the current join began, for the rotate-on-timeout.
+    int      net_idx_     = 0;
+    uint32_t net_join_at_ = 0;
     uint32_t last_upload = 0;
     String upload_url;            // resolved upload endpoint (mDNS or fallback)
 
@@ -79,6 +85,8 @@ class RecorderServer {
     uint32_t done_until_   = 0;   // millis() until which the ✓ "all sent" holds
     uint32_t failed_until_ = 0;   // millis() until which the ⚠ failed holds
 
+    void joinNet(int i);          // begin association with network i (non-blocking)
+    void netDown();               // end mDNS, drop the resolved URL (network changed)
     void routes();
     void handleList();
     void handleDownload();

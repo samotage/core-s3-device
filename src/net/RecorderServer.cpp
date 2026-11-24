@@ -36,6 +36,34 @@ extern SemaphoreHandle_t g_spi_bus_mutex;
 #ifndef HEADSPACE_UPLOAD_URL
 #  define HEADSPACE_UPLOAD_URL ""  // empty -> compile-time fallback disabled
 #endif
+// Second network — the iPhone Personal Hotspot (#4309). Optional: when absent the
+// device behaves exactly as before (home WiFi only).
+#ifndef WIFI2_SSID
+#  define WIFI2_SSID ""
+#endif
+#ifndef WIFI2_PASS
+#  define WIFI2_PASS ""
+#endif
+// Headspace host's Bonjour name (macOS LocalHostName, no ".local"). Resolved by
+// mDNS host query, answered live by macOS mDNSResponder on whatever network the
+// laptop is on — unlike Headspace's _otl-recordings advert, which carries the IP
+// detected once at server start and goes stale when the laptop moves home ->
+// hotspot without a restart. Empty -> host query skipped.
+#ifndef HEADSPACE_MDNS_HOST
+#  define HEADSPACE_MDNS_HOST ""
+#endif
+#ifndef HEADSPACE_PORT
+#  define HEADSPACE_PORT 15055  // used when the host resolves but the service browse doesn't
+#endif
+
+// Network rotation. A join that hasn't reached WL_CONNECTED in this long moves on
+// to the next configured network. 20 s covers a WPA2 4-way handshake + DHCP on an
+// iPhone hotspot with margin (typically 3-6 s).
+#define NET_JOIN_TIMEOUT_MS 20000UL
+// Connected, backlog waiting, but this many consecutive cycles failed to find or
+// reach Headspace -> this network can't see the laptop; try the next one. Stops
+// the device sitting on the hotspot at home (laptop on home WiFi) forever.
+#define NET_ROTATE_FAILS 3
 
 // Filenames already persisted by Headspace, one per line. Lets the device avoid
 // re-uploading the same recording across reboots.
@@ -46,10 +74,52 @@ namespace Net {
 
 RecorderServer Server;
 
-static bool creds_present() { return strlen(WIFI_SSID) > 0; }
+// Priority-ordered network list: home first, hotspot second. Entries with an
+// empty SSID are skipped, so a single-network secrets.h still works.
+struct NetCred {
+    const char* ssid;
+    const char* pass;
+};
+static const NetCred kNetsAll[] = {
+    {WIFI_SSID, WIFI_PASS},
+    {WIFI2_SSID, WIFI2_PASS},
+};
+static NetCred kNets[sizeof(kNetsAll) / sizeof(kNetsAll[0])];
+static int kNetCount = -1;
+
+static int net_count() {
+    if (kNetCount < 0) {
+        kNetCount = 0;
+        for (const NetCred& c : kNetsAll)
+            if (strlen(c.ssid) > 0) kNets[kNetCount++] = c;
+    }
+    return kNetCount;
+}
+
+static bool creds_present() { return net_count() > 0; }
 
 static void bus_take() { if (g_spi_bus_mutex) xSemaphoreTake(g_spi_bus_mutex, portMAX_DELAY); }
 static void bus_give() { if (g_spi_bus_mutex) xSemaphoreGive(g_spi_bus_mutex); }
+
+// Start (non-blocking) association with network i. WiFi.begin() returns at once;
+// loop() polls WL_CONNECTED and rotates on NET_JOIN_TIMEOUT_MS. No scan — a
+// blocking scanNetworks() would stall the UI ~2 s per call.
+void RecorderServer::joinNet(int i) {
+    int n = net_count();
+    if (n == 0) return;
+    net_idx_     = ((i % n) + n) % n;
+    net_join_at_ = millis();
+    WiFi.begin(kNets[net_idx_].ssid, kNets[net_idx_].pass);
+    Serial.printf("[NET] Connecting to \"%s\" (%d/%d)...\n", kNets[net_idx_].ssid,
+                  net_idx_ + 1, n);
+}
+
+// Drop the per-network services so they re-init against the next network's IP.
+void RecorderServer::netDown() {
+    if (started) MDNS.end();
+    started    = false;
+    upload_url = "";  // resolved on the old subnet — never valid on the next one
+}
 
 void RecorderServer::begin() {
     if (!creds_present()) {
@@ -58,8 +128,12 @@ void RecorderServer::begin() {
     }
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(REC_HOSTNAME);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    Serial.printf("[NET] Connecting to \"%s\"...\n", WIFI_SSID);
+    joinNet(0);
+}
+
+String RecorderServer::netName() {
+    if (!creds_present() || WiFi.status() != WL_CONNECTED) return String("");
+    return String(kNets[net_idx_].ssid);
 }
 
 void RecorderServer::loop() {
@@ -82,9 +156,10 @@ void RecorderServer::loop() {
             // reachable (at meetings, off-home WiFi). That competes with the
             // I2S DMA and crashes the device after ~13 min. Fully OFF the radio
             // so no background WiFi work can run at all.
+            netDown();            // mDNS ended + URL dropped; re-init when WiFi comes back
             WiFi.mode(WIFI_OFF);
-            started     = false;  // mDNS + HTTP need to re-init when WiFi comes back
-            was_paused  = true;
+            was_connected_ = false;
+            was_paused     = true;
         }
         return;
     }
@@ -92,7 +167,10 @@ void RecorderServer::loop() {
         Serial.println("[NET] resumed — re-enabling WiFi");
         WiFi.mode(WIFI_STA);
         WiFi.setHostname(REC_HOSTNAME);
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        // Always start at the top of the priority list: home first, then the
+        // hotspot after one join timeout. Costs ~20 s on the road, but means a
+        // device back home never stays parked on the phone's hotspot.
+        joinNet(0);
         was_paused = false;
         // started is false; the connected-and-not-started branch below will
         // re-init mDNS + HTTP once association completes.
@@ -110,22 +188,37 @@ void RecorderServer::loop() {
 
     bool connected = (WiFi.status() == WL_CONNECTED);
 
-    // Bring up mDNS + HTTP once, the first time WiFi comes up. mDNS is torn down
-    // when WiFi goes OFF during recording (started reset to false above), so this
-    // re-runs the service browse on every recording->idle transition, not just at
-    // boot — the server's DHCP IP may have changed.
+    // Network lost (out of hotspot range, AP rebooted): tear down the services
+    // bound to the old subnet and retry the same network first — the IDF
+    // auto-reconnect is already on it; the timeout below rotates if it's gone.
+    if (!connected && was_connected_) {
+        Serial.printf("[NET] lost \"%s\"\n", kNets[net_idx_].ssid);
+        was_connected_ = false;
+        netDown();
+        net_join_at_ = millis();
+    }
+    if (connected) was_connected_ = true;
+
+    // Bring up mDNS + HTTP on each new association. mDNS is torn down whenever
+    // WiFi drops or goes OFF for recording (netDown), so this re-runs the service
+    // browse on every join — the network, and Headspace's IP, may have changed.
     if (connected && !started) {
         if (MDNS.begin(REC_HOSTNAME)) {
             MDNS.addService("http", "tcp", 80);
             MDNS.addServiceTxt("http", "tcp", "path", "/api/recordings");
         }
         resolveUploadUrl();      // browse for _otl-recordings._tcp (or fallback)
-        routes();
-        server.begin();
+        if (!routes_registered_) {
+            // Once only: WebServer appends handlers to a list, so re-registering
+            // on every join leaked a handler set per recording.
+            routes();
+            routes_registered_ = true;
+        }
+        server.begin();          // no-op if already listening
         started        = true;
         upload_pending = true;   // push anything un-acked as soon as we're up
-        Serial.printf("[NET] Up: http://%s.local  (%s)\n", REC_HOSTNAME,
-                      WiFi.localIP().toString().c_str());
+        Serial.printf("[NET] Up on \"%s\": http://%s.local  (%s)\n", kNets[net_idx_].ssid,
+                      REC_HOSTNAME, WiFi.localIP().toString().c_str());
     }
 
     if (started) server.handleClient();
@@ -148,12 +241,25 @@ void RecorderServer::loop() {
         uploadCycle();
     }
 
-    if (!connected) {
-        uint32_t now = millis();
-        if (now - last_retry > 15000) {
-            last_retry = now;
-            WiFi.reconnect();
-        }
+    // Connected but this network can't reach Headspace (e.g. on the hotspot at
+    // home while the laptop is on home WiFi) — rotate so the backlog can land.
+    if (connected && net_count() > 1 && pending_count_ > 0 &&
+        fail_streak_ >= NET_ROTATE_FAILS) {
+        Serial.printf("[NET] Headspace unreachable on \"%s\" after %d tries — next network\n",
+                      kNets[net_idx_].ssid, fail_streak_);
+        fail_streak_   = 0;
+        was_connected_ = false;
+        netDown();
+        WiFi.disconnect();
+        joinNet(net_idx_ + 1);
+        return;
+    }
+
+    // Not associated: give the current network NET_JOIN_TIMEOUT_MS, then move on
+    // down the list (wrapping). With one network this just re-begins it, which
+    // replaces the old 15 s WiFi.reconnect() poke.
+    if (!connected && millis() - net_join_at_ > NET_JOIN_TIMEOUT_MS) {
+        joinNet(net_idx_ + 1);
     }
 }
 
@@ -315,6 +421,10 @@ void RecorderServer::handleDiag() {
                String(mv ? Page::AppPowerModel::BatteryPercentFromMv(mv) : 0) +
                "% charging=" + String(chg) + "  (0=none 1=charging 2=discharging)\n";
     }
+    out += "\n== network ==\n";
+    out += "ssid=\"" + netName() + "\" ip=" + WiFi.localIP().toString() +
+           " rssi=" + String(WiFi.RSSI()) + " upload_url=" +
+           (upload_url.length() ? upload_url : String("(none)")) + "\n";
 
     out += "\n== " DIAG_LOG_PATH " ==\n";
 
@@ -359,14 +469,46 @@ void RecorderServer::ackFile(const String& name) {
 // nothing. If neither resolves, upload_url stays empty and uploads are disabled.
 // NOTE: queryService takes the bare service/proto — the lib prepends the '_'.
 // Passing "_otl-recordings"/"_tcp" makes the browse silently return 0 results.
+static bool same_subnet(IPAddress a, IPAddress b, IPAddress mask) {
+    return ((uint32_t)a & (uint32_t)mask) == ((uint32_t)b & (uint32_t)mask);
+}
+
 void RecorderServer::resolveUploadUrl() {
     upload_url = "";
+    IPAddress local = WiFi.localIP();
+    IPAddress mask  = WiFi.subnetMask();
+
+    // 1. Service browse: gives the port, and an IP that may be stale (see
+    //    HEADSPACE_MDNS_HOST).
+    IPAddress svc_ip;
+    uint16_t  port = 0;
     int n = MDNS.queryService("otl-recordings", "tcp");
     if (n > 0) {
-        upload_url = String("http://") + MDNS.IP(0).toString() + ":" +
-                     String(MDNS.port(0)) + "/api/uploads/recordings";
-        Serial.printf("[NET] upload endpoint via mDNS: %s (host %s)\n",
-                      upload_url.c_str(), MDNS.hostname(0).c_str());
+        svc_ip = MDNS.IP(0);
+        port   = MDNS.port(0);
+        Serial.printf("[NET] mDNS service: %s:%u (host %s)%s\n", svc_ip.toString().c_str(),
+                      port, MDNS.hostname(0).c_str(),
+                      same_subnet(svc_ip, local, mask) ? "" : "  [off-subnet — stale advert?]");
+    }
+
+    // 2. Host query: live IP for the laptop on THIS network. Preferred whenever it
+    //    answers, because the advert's IP is fixed at Headspace start.
+    IPAddress host_ip;
+    if (strlen(HEADSPACE_MDNS_HOST) > 0) {
+        host_ip = MDNS.queryHost(HEADSPACE_MDNS_HOST, 2000);
+        if ((uint32_t)host_ip != 0)
+            Serial.printf("[NET] mDNS host %s.local -> %s\n", HEADSPACE_MDNS_HOST,
+                          host_ip.toString().c_str());
+    }
+
+    IPAddress use_ip;
+    if ((uint32_t)host_ip != 0)     use_ip = host_ip;
+    else if (n > 0)                 use_ip = svc_ip;
+    if ((uint32_t)use_ip != 0) {
+        if (port == 0) port = HEADSPACE_PORT;
+        upload_url = String("http://") + use_ip.toString() + ":" + String(port) +
+                     "/api/uploads/recordings";
+        Serial.printf("[NET] upload endpoint: %s\n", upload_url.c_str());
         return;
     }
     if (strlen(HEADSPACE_UPLOAD_URL) > 0) {
@@ -546,7 +688,10 @@ void RecorderServer::uploadCycle() {
     if (upload_url.length() == 0 || fail_streak_ > 0) {
         resolveUploadUrl();
     }
-    if (upload_url.length() == 0) return;  // still no endpoint — retry next cycle
+    if (upload_url.length() == 0) {  // still no endpoint — retry next cycle
+        fail_streak_++;              // counts toward the network-rotate threshold
+        return;
+    }
 
     // Find the first un-acked, non-empty recording (oldest-first by directory
     // order). One per cycle; the rest follow on subsequent ticks.
