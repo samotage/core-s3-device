@@ -27,8 +27,9 @@ plain HTTP) is unchanged.
   device stores it in NVS.
 - Token scope: the recorder routes R1–R3 only. Refused everywhere else, same
   closed-world rule as the voice device token (`services/device_access.py`).
-  Either a new token kind or the existing device token with a recorder scope —
-  Con's call.
+  **Decided:** reuse the Tab5 `devices` table (hashed storage, revoke,
+  reissue) with a new `kind` column (`voice` | `recorder`); each kind's token
+  is refused on the other kind's routes.
 - Revocable and rotatable from Headspace. Re-vend replaces the old token.
 - nginx: R1–R3 added to the public listener allow-list
   (`services/nginx_public_listener.py`), with a `limit_req` rate limit and
@@ -43,10 +44,12 @@ plain HTTP) is unchanged.
 
 Headers: `X-Device-Id: core-s3`
 
-- Refused (403) when `X-Headspace-Listener` is present (public request).
-- Approval model — Con to propose; options: (a) issue only while a short
-  "pairing window" is opened from the Headspace UI/CLI, or (b) issue to any LAN
-  caller for a known device id. Recommend (a).
+- Public-listener request → 403 `{"error": "lan_only"}`.
+- **Pairing window (decided):** opened from Headspace CLI or UI, lasts 5 min,
+  issues one token, then closes. Outside it → 403 `{"error": "pairing_closed"}`.
+  A known device id proves nothing (it's in a public repo).
+- Device matches on the `error` field, not the status code. Pairing is
+  triggered by a "Pair" button on the device Settings page.
 
 201:
 ```json
