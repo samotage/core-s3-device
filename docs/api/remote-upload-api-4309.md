@@ -67,8 +67,18 @@ The device calls R0 on the LAN when it has no token, or when R1–R3 return 401.
 Headers: `Authorization: Bearer <token>`, `X-Device-Id`, `Content-Type: application/json`
 
 ```json
-{"filename": "REC_042.wav", "total_size": 115200044}
+{"filename": "REC_042_02.wav", "total_size": 57600044,
+ "session_id": "20261128T093012-042", "segment": 2, "final": false}
 ```
+
+**Segments (no duration cap).** A recording runs until Sam presses Stop and is
+written as 30-min gapless segment files `REC_<NNN>_<SS>.wav`. All segments of one
+recording share `session_id` = RTC start time + file number (unique even if the
+counter resets). `segment` is 1-based. `final: true` only on the segment closed
+by Stop. Headspace joins a session's segments, in order, into one transcript.
+If `final` never arrives (crash mid-recording), Headspace finalises the session
+with the segments it has — timeout is Con's call. The LAN path carries the same
+three fields as headers: `X-Session-Id`, `X-Segment`, `X-Segment-Final` (`1`/`0`).
 
 200/201:
 ```json
